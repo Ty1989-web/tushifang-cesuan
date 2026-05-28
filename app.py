@@ -76,6 +76,11 @@ with col_form:
         process = st.selectbox("工艺选择", OPTIONS['process'],
                                index=OPTIONS['process'].index(DEFAULT_PARAMS['process']))
 
+    # 根据工艺判断哪些参数区需要展开
+    needs_blast = '爆破' in process  # 含"爆破"或"爆破+二次破碎"
+    # 注：松土器/破碎锤的参数 V8 模型走的是参数库自动取值，
+    #     用户层目前无独立 widget，故这里只做钻机/爆破区的智能折叠。
+
     # —— 设备选型 ——
     with st.expander("🚜 设备选型", expanded=True):
         c1, c2 = st.columns(2)
@@ -84,15 +89,22 @@ with col_form:
                                      index=OPTIONS['excavator'].index(DEFAULT_PARAMS['excavator']))
             truck = st.selectbox("矿卡型号", OPTIONS['truck'],
                                  index=OPTIONS['truck'].index(DEFAULT_PARAMS['truck']))
-            drill = st.selectbox("钻机型号", OPTIONS['drill'],
-                                 index=OPTIONS['drill'].index(DEFAULT_PARAMS['drill']))
+            if needs_blast:
+                drill = st.selectbox("钻机型号", OPTIONS['drill'],
+                                     index=OPTIONS['drill'].index(DEFAULT_PARAMS['drill']))
+            else:
+                drill = DEFAULT_PARAMS['drill']
+                st.caption("🚫 钻机型号（当前工艺不含爆破，已隐藏）")
         with c2:
             excavator_src = st.radio("挖机来源", OPTIONS['excavator_src'], horizontal=True,
                                      index=OPTIONS['excavator_src'].index(DEFAULT_PARAMS['excavator_src']))
             truck_src = st.radio("矿卡来源", OPTIONS['truck_src'], horizontal=True,
                                  index=OPTIONS['truck_src'].index(DEFAULT_PARAMS['truck_src']))
-            drill_src = st.radio("钻机来源", OPTIONS['drill_src'], horizontal=True,
-                                 index=OPTIONS['drill_src'].index(DEFAULT_PARAMS['drill_src']))
+            if needs_blast:
+                drill_src = st.radio("钻机来源", OPTIONS['drill_src'], horizontal=True,
+                                     index=OPTIONS['drill_src'].index(DEFAULT_PARAMS['drill_src']))
+            else:
+                drill_src = DEFAULT_PARAMS['drill_src']
 
     # —— 运输参数 ——
     with st.expander("🛣️ 运输参数", expanded=True):
@@ -112,30 +124,43 @@ with col_form:
             slope_out = st.number_input("场外坡度 (%)", min_value=0.0, max_value=30.0,
                                         value=float(DEFAULT_PARAMS['slope_out']), step=0.5)
 
-    # —— 爆破设计 ——
-    with st.expander("💥 爆破设计参数", expanded=False):
-        c1, c2 = st.columns(2)
-        with c1:
-            blast_len = st.number_input("爆破区域长度 (m)", min_value=10, max_value=300,
-                                        value=int(DEFAULT_PARAMS['blast_len']), step=5)
-            blast_wid = st.number_input("爆破区域宽度 (m)", min_value=5, max_value=100,
-                                        value=int(DEFAULT_PARAMS['blast_wid']), step=2)
-            buffer_rows = st.selectbox("缓冲孔排数", OPTIONS['buffer_rows'],
-                                       index=OPTIONS['buffer_rows'].index(DEFAULT_PARAMS['buffer_rows']))
-            step_h = st.number_input("台阶高度 H (m)", min_value=5.0, max_value=20.0,
-                                     value=float(DEFAULT_PARAMS['step_h']), step=0.5,
-                                     help="合理范围 5-15m，推荐 8-12m")
-        with c2:
-            slope_angle = st.number_input("坡面角 α (°)", min_value=50, max_value=90,
-                                          value=int(DEFAULT_PARAMS['slope_angle']), step=1)
-            hole_angle = st.number_input("钻孔倾角 (°)", min_value=60, max_value=90,
-                                         value=int(DEFAULT_PARAMS['hole_angle']), step=1)
-            hole_pattern = st.selectbox("布孔形式", OPTIONS['hole_pattern'],
-                                        index=OPTIONS['hole_pattern'].index(DEFAULT_PARAMS['hole_pattern']))
-            hole_diameter = st.selectbox("孔径 (mm)", OPTIONS['hole_diameter'],
-                                         index=OPTIONS['hole_diameter'].index(DEFAULT_PARAMS['hole_diameter']))
-            pre_split = st.radio("是否预裂", OPTIONS['pre_split'], horizontal=True,
-                                 index=OPTIONS['pre_split'].index(DEFAULT_PARAMS['pre_split']))
+    # —— 爆破设计（仅在工艺含爆破时展开；不含爆破时直接全部用默认值） ——
+    if needs_blast:
+        with st.expander("💥 爆破设计参数", expanded=False):
+            c1, c2 = st.columns(2)
+            with c1:
+                blast_len = st.number_input("爆破区域长度 (m)", min_value=10, max_value=300,
+                                            value=int(DEFAULT_PARAMS['blast_len']), step=5)
+                blast_wid = st.number_input("爆破区域宽度 (m)", min_value=5, max_value=100,
+                                            value=int(DEFAULT_PARAMS['blast_wid']), step=2)
+                buffer_rows = st.selectbox("缓冲孔排数", OPTIONS['buffer_rows'],
+                                           index=OPTIONS['buffer_rows'].index(DEFAULT_PARAMS['buffer_rows']))
+                step_h = st.number_input("台阶高度 H (m)", min_value=5.0, max_value=20.0,
+                                         value=float(DEFAULT_PARAMS['step_h']), step=0.5,
+                                         help="合理范围 5-15m，推荐 8-12m")
+            with c2:
+                slope_angle = st.number_input("坡面角 α (°)", min_value=50, max_value=90,
+                                              value=int(DEFAULT_PARAMS['slope_angle']), step=1)
+                hole_angle = st.number_input("钻孔倾角 (°)", min_value=60, max_value=90,
+                                             value=int(DEFAULT_PARAMS['hole_angle']), step=1)
+                hole_pattern = st.selectbox("布孔形式", OPTIONS['hole_pattern'],
+                                            index=OPTIONS['hole_pattern'].index(DEFAULT_PARAMS['hole_pattern']))
+                hole_diameter = st.selectbox("孔径 (mm)", OPTIONS['hole_diameter'],
+                                             index=OPTIONS['hole_diameter'].index(DEFAULT_PARAMS['hole_diameter']))
+                pre_split = st.radio("是否预裂", OPTIONS['pre_split'], horizontal=True,
+                                     index=OPTIONS['pre_split'].index(DEFAULT_PARAMS['pre_split']))
+    else:
+        # 工艺不含爆破，所有爆破参数走默认值（不参与计算，仅占位）
+        blast_len = DEFAULT_PARAMS['blast_len']
+        blast_wid = DEFAULT_PARAMS['blast_wid']
+        buffer_rows = DEFAULT_PARAMS['buffer_rows']
+        step_h = DEFAULT_PARAMS['step_h']
+        slope_angle = DEFAULT_PARAMS['slope_angle']
+        hole_angle = DEFAULT_PARAMS['hole_angle']
+        hole_pattern = DEFAULT_PARAMS['hole_pattern']
+        hole_diameter = DEFAULT_PARAMS['hole_diameter']
+        pre_split = DEFAULT_PARAMS['pre_split']
+        st.caption("🚫 爆破设计参数（当前工艺不含爆破，已隐藏；如需启用请将工艺改为「爆破+开挖」或「爆破+二次破碎+开挖」）")
 
     # —— 计算按钮 ——
     calc_btn = st.button("🧮 开始测算", type='primary', use_container_width=True)
@@ -180,8 +205,13 @@ with col_result:
         elapsed = st.session_state.get('last_elapsed', 0)
 
         # —— 综合单价大数字 ——
+        warning = result.get('warning')
+        has_hard_warn = warning and warning.get('severity') in ('error', 'warning')
+        price_label = "💰 综合单价（含税）"
+        if has_hard_warn:
+            price_label = "⚠️ 综合单价（含税）"
         m1, m2 = st.columns(2)
-        m1.metric("💰 综合单价（含税）",
+        m1.metric(price_label,
                   f"{result['price_incl_tax']:.2f} 元/方" if result.get('price_incl_tax') else "—")
         m2.metric("综合单价（不含税）",
                   f"{result['price_excl_tax']:.2f} 元/方" if result.get('price_excl_tax') else "—")
@@ -212,6 +242,14 @@ with col_result:
             )
             st.bar_chart(df.set_index('项目'))
 
+            # 惩罚说明
+            if result.get('cost_excavate_original') is not None and result.get('penalty_multiplier'):
+                orig = result['cost_excavate_original']
+                mult = result['penalty_multiplier']
+                st.caption(
+                    f"📌 挖装费已应用工艺错配惩罚：原 {orig:.2f} × 惩罚倍数 {mult:.2f} = {orig*mult:.2f} 元/方"
+                )
+
         # —— 岩石参数联动展示 ——
         with st.expander("📐 岩石参数（自动匹配）"):
             c1, c2, c3, c4 = st.columns(4)
@@ -228,6 +266,39 @@ with col_result:
 
         # —— 校验警告 ——
         warns = [v for k, v in result.items() if k.startswith('warn_') and v and '⚠' in str(v)]
+
+        # 1) 工艺错配警告（最显眼）
+        if warning:
+            sev = warning.get('severity')
+            ptype = warning.get('process_user', '—')
+            rec = warning.get('process_recommend', '—')
+            eff = warning.get('efficiency_factor', 1.0)
+            con = warning.get('consume_factor', 1.0)
+            msg = warning.get('message', '')
+            is_pen = warning.get('is_penalty')
+
+            if sev == 'error':
+                st.error(
+                    f"🚨 **工艺错配严重警告**：当前岩石推荐 **{rec}**，您选择了 **{ptype}**。\n\n"
+                    f"- {msg}\n"
+                    f"- 效率折减系数：**{eff:.2f}**，耗材倍率：**{con:.2f}**\n"
+                    f"- ⚠️ 已自动应用惩罚倍数，挖装费大幅放大。**强烈建议改用「{rec}」**。"
+                )
+            elif sev == 'warning':
+                st.warning(
+                    f"⚠️ **工艺错配警告**：当前岩石推荐 **{rec}**，您选择了 **{ptype}**。\n\n"
+                    f"- {msg}\n"
+                    f"- 效率折减系数：**{eff:.2f}**，耗材倍率：**{con:.2f}**\n"
+                    f"- 已应用惩罚倍数，实际请考虑改用「{rec}」。"
+                )
+            elif sev == 'info':
+                st.info(
+                    f"💡 工艺偏保守：当前岩石推荐 **{rec}**，您选择了 **{ptype}**。"
+                    f"{('（' + msg + '）') if msg else ''}"
+                    f"未应用惩罚，仅供参考。"
+                )
+
+        # 2) 其他校验提示（原 warn_* 字段）
         if warns:
             st.warning("⚠️ 校验提示：\n\n" + "\n\n".join(f"- {w}" for w in warns))
 
