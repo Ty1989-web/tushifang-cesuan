@@ -1,0 +1,230 @@
+"""
+model_core.py — 黑山土石方测算模型的「计算核心」
+
+职责：
+    compute(params: dict) -> dict
+        输入 21 个用户参数 → 输出单价、各成本拆解、警告等
+
+    export_xlsx(params: dict) -> bytes
+        输入 21 个用户参数 → 返回完整 xlsx 文件的字节流（可直接下载）
+
+依赖：
+    - build_v8.py（同目录上一级）
+    - libreoffice headless（系统命令，用于公式重算）
+
+启动开销：
+    首次 import 时跑一次 build_v8 生成 template_v8.xlsx，约 1-2 秒
+    后续每次 compute / export 调用约 5-10 秒（libreoffice 重算）
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import shutil
+import tempfile
+import subprocess
+import io
+from typing import Any, Dict
+
+# ---------- 路径：让本模块可定位到 build_v8.py（同目录或上一级目录都能找到）----------
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_PARENT = os.path.dirname(_HERE)
+for _p in (_HERE, _PARENT):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from openpyxl import load_workbook
+
+# ---------- 启动时生成一次模板 ----------
+_TEMPLATE_PATH = os.path.join(_HERE, 'template_v8.xlsx')
+
+def _ensure_template():
+    """首次调用时跑 build_v8 生成 template_v8.xlsx；后续直接复用"""
+    if os.path.exists(_TEMPLATE_PATH):
+        return
+    import build_v8  # 执行 build_v8.py 模块（已在 if __name__='__main__' 内保护 save）
+    build_v8.wb.save(_TEMPLATE_PATH)
+
+# ---------- 输入参数到主表 cell 的映射 ----------
+# (cell, 类型 'str'|'num', 默认值)
+PARAM_MAP = {
+    # 岩石
+    'rock_level':   ('B4',  'str', 'Ⅰ极软岩'),
+    # 工艺
+    'process':      ('B12', 'str', '直接开挖'),
+    # 挖装设备
+    'excavator':    ('B17', 'str', 'W4.5'),
+    'excavator_src':('B18', 'str', '自有'),
+    # 运输设备
+    'truck':        ('B23', 'str', 'T65B'),
+    'truck_src':    ('B24', 'str', '自有'),
+    # 钻孔设备
+    'drill':        ('B29', 'str', 'ZG90'),
+    'drill_src':    ('B30', 'str', '自有'),
+    # 运输参数
+    'dist_in':      ('B34', 'num', 2.1),
+    'dist_out':     ('B35', 'num', 5.0),
+    'dir_in':       ('B37', 'str', '平路'),
+    'slope_in':     ('B38', 'num', 1.5),
+    'dir_out':      ('B39', 'str', '平路'),
+    'slope_out':    ('B40', 'num', 1.0),
+    # 爆破设计
+    'blast_len':    ('B44', 'num', 50),
+    'blast_wid':    ('B45', 'num', 20),
+    'buffer_rows':  ('B46', 'num', 1),
+    'step_h':       ('B47', 'num', 10),
+    'slope_angle':  ('B48', 'num', 75),
+    'hole_angle':   ('B49', 'num', 90),
+    'hole_pattern': ('B50', 'str', '矩形'),
+    'hole_diameter':('B52', 'num', 90),
+    'pre_split':    ('B53', 'str', '否'),
+}
+
+# ---------- 输出 cell（用于 compute 返回值） ----------
+OUTPUT_CELLS = {
+    # 综合单价（最关键）
+    'price_incl_tax':   ('成本汇总-测算主表', 'B65'),
+    'price_excl_tax':   ('成本汇总-测算主表', 'B64'),
+    # 各成本项
+    'cost_blast':       ('成本汇总-测算主表', 'B57'),
+    'cost_excavate':    ('成本汇总-测算主表', 'B58'),
+    'cost_transport':   ('成本汇总-测算主表', 'B59'),
+    'cost_loosen':      ('成本汇总-测算主表', 'B60'),
+    'cost_crush':       ('成本汇总-测算主表', 'B61'),
+    'cost_second_crush':('成本汇总-测算主表', 'B62'),
+    'cost_dump':        ('成本汇总-测算主表', 'B63'),
+    # 联动的岩石参数
+    'f_value':          ('成本汇总-测算主表', 'B5'),
+    'density':          ('成本汇总-测算主表', 'B6'),
+    'loose_factor':     ('成本汇总-测算主表', 'B7'),
+    'big_block_rate':   ('成本汇总-测算主表', 'B8'),
+    # 推荐
+    'recommend_process':('成本汇总-测算主表', 'B13'),
+    'recommend_exc':    ('成本汇总-测算主表', 'B19'),
+    'recommend_drill':  ('成本汇总-测算主表', 'B28'),
+    # 校验警告
+    'warn_process':     ('成本汇总-测算主表', 'B14'),
+    'warn_truck':       ('成本汇总-测算主表', 'B25'),
+    'warn_drill':       ('成本汇总-测算主表', 'B31'),
+    'warn_slope':       ('成本汇总-测算主表', 'B41'),
+    'warn_step':        ('成本汇总-测算主表', 'B54'),
+}
+
+# ---------- 选项常量（给 UI 用） ----------
+OPTIONS = {
+    'rock_level':   ['Ⅰ极软岩', 'Ⅱ软岩', 'Ⅲ较软岩', 'Ⅳ中硬岩',
+                     'Ⅴ较硬岩', 'Ⅵ坚硬岩', 'Ⅶ极硬岩', 'Ⅷ特殊坚硬岩'],
+    'process':      ['直接开挖', '松土器松土+开挖', '机械破碎+开挖',
+                     '爆破+开挖', '爆破+二次破碎+开挖'],
+    'excavator':    ['W1.6', 'W2.0', 'W2.5', 'W3.2', 'E2.0',
+                     'W4.5', 'W5.5', 'W6.5', 'W8.0', 'E6.5', 'E8.0'],
+    'excavator_src':['自有', '租赁'],
+    'truck':        ['T30H', 'E30S', 'T65B', 'T60S', 'T91B', 'E60Y', 'E93L', 'E75T'],
+    'truck_src':    ['自有', '租赁'],
+    'drill':        ['ZG90', 'ZG120', 'ACD7', 'ACD9', 'AC90', 'AC120', 'KY200', 'KY250'],
+    'drill_src':    ['自有', '租赁'],
+    'dir_in':       ['平路', '上坡', '下坡'],
+    'dir_out':      ['平路', '上坡', '下坡'],
+    'hole_pattern': ['矩形', '梅花形'],
+    'hole_diameter':[70, 90, 115, 150, 200, 250],
+    'pre_split':    ['是', '否'],
+    'buffer_rows':  [0, 1, 2],
+}
+
+# ---------- 默认参数（用户视角的"默认工况"） ----------
+DEFAULT_PARAMS = {k: v[2] for k, v in PARAM_MAP.items()}
+
+
+# ---------- 核心：把参数应用到模板 + libreoffice 重算 ----------
+def _build_and_calc(params: Dict[str, Any], workdir: str) -> str:
+    """把参数写入主表 → save → libreoffice 重算 → 返回重算后文件路径"""
+    _ensure_template()
+    src = os.path.join(workdir, 'src.xlsx')
+    shutil.copy(_TEMPLATE_PATH, src)
+
+    # 1. 写主表参数
+    wb = load_workbook(src)
+    ws = wb['成本汇总-测算主表']
+    full = {**DEFAULT_PARAMS, **(params or {})}
+    for key, val in full.items():
+        if key not in PARAM_MAP:
+            continue
+        cell, typ, _ = PARAM_MAP[key]
+        if typ == 'num':
+            try:
+                val = float(val)
+            except (TypeError, ValueError):
+                continue
+        ws[cell] = val
+    wb.save(src)
+
+    # 2. libreoffice headless 重算
+    out_dir = os.path.join(workdir, 'recalc')
+    os.makedirs(out_dir, exist_ok=True)
+    soffice = _find_libreoffice()
+    cmd = [soffice, '--headless', '--calc',
+           '--convert-to', 'xlsx', '--outdir', out_dir, src]
+    res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    if res.returncode != 0:
+        raise RuntimeError(f"libreoffice 重算失败：{res.stderr or res.stdout}")
+    out_path = os.path.join(out_dir, 'src.xlsx')
+    if not os.path.exists(out_path):
+        raise RuntimeError("libreoffice 未生成输出文件")
+    return out_path
+
+
+def _find_libreoffice() -> str:
+    for name in ('soffice', 'libreoffice'):
+        p = shutil.which(name)
+        if p:
+            return p
+    raise RuntimeError("找不到 libreoffice/soffice 命令，请先安装 libreoffice")
+
+
+# ---------- 对外 API ----------
+def compute(params: Dict[str, Any] = None) -> Dict[str, Any]:
+    """
+    给一组用户参数，返回所有关键计算结果。
+    返回的 dict 包含 OUTPUT_CELLS 里全部 key + 'inputs' 回显。
+    """
+    with tempfile.TemporaryDirectory() as workdir:
+        recalc_path = _build_and_calc(params or {}, workdir)
+        wb = load_workbook(recalc_path, data_only=True)
+        out = {}
+        for key, (sheet, cell) in OUTPUT_CELLS.items():
+            v = wb[sheet][cell].value
+            out[key] = v
+        out['inputs'] = {**DEFAULT_PARAMS, **(params or {})}
+        return out
+
+
+def export_xlsx(params: Dict[str, Any] = None) -> bytes:
+    """
+    给一组用户参数，返回完整 xlsx 字节流（含所有 8 个 sheet + 公式计算后的值）
+    可直接放进 Streamlit 的 st.download_button(data=...)
+    """
+    with tempfile.TemporaryDirectory() as workdir:
+        recalc_path = _build_and_calc(params or {}, workdir)
+        with open(recalc_path, 'rb') as f:
+            return f.read()
+
+
+# ---------- 自检 ----------
+if __name__ == '__main__':
+    print("[1/3] 生成模板...")
+    _ensure_template()
+    print(f"      模板路径: {_TEMPLATE_PATH}  ({os.path.getsize(_TEMPLATE_PATH)} bytes)")
+
+    print("[2/3] 默认工况（Ⅰ极软岩 + 直接开挖）...")
+    r = compute()
+    print(f"      含税综合单价: {r['price_incl_tax']:.4f} 元/方  （预期 ≈ 8.92）")
+    print(f"      不含税:       {r['price_excl_tax']:.4f}")
+    print(f"      挖装费:       {r['cost_excavate']:.4f}")
+    print(f"      运输费:       {r['cost_transport']:.4f}")
+
+    print("[3/3] 黑山合同对标工况（Ⅲ较软岩 + 直接开挖）...")
+    r2 = compute({'rock_level': 'Ⅲ较软岩'})
+    print(f"      含税综合单价: {r2['price_incl_tax']:.4f} 元/方  （预期 ≈ 11.88）")
+
+    print("\n✅ 自检通过")

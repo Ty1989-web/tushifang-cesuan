@@ -1,0 +1,47 @@
+## 账号配置文件 ##
+# 改密码方法：
+#   python3 -c "import bcrypt; print(bcrypt.hashpw(b'新密码', bcrypt.gensalt()).decode())"
+# 把生成的 hash 粘到对应账号的 password 字段
+
+cookie:
+  name: heishan_calc_cookie
+  key: change_me_to_a_random_long_string_for_security_2026
+  expiry_days: 7
+
+# 预授权（哪些邮箱允许注册），暂不用
+pre-authorized:
+  emails: []
+
+credentials:
+  usernames:
+    admin:
+      name: 管理员
+      password: $2b$10$fg1/02ACg3dzs6UXRBWMQu9SAPzqBk9hqv2AAfKJGB66mqV7j1hvO
+      email: admin@example.com
+      first_name: ''
+      last_name: ''
+      # 默认密码：Admin#2026
+
+    zaojia1:
+      name: 造价员一
+      password: $2b$10$tp2adqJ7e2/m6iSWrbMX6OfTHlCdljy0OgzPy/Zqx4ho1p5nErEia
+      email: zaojia1@example.com
+      first_name: ''
+      last_name: ''
+      # 默认密码：Zj1#2026
+
+    zaojia2:
+      name: 造价员二
+      password: $2b$10$k35V/oN0oilC0QZLs.OIqeXT5bc5nPQCNgaweOFTlOKjWEMV7g2ze
+      email: zaojia2@example.com
+      first_name: ''
+      last_name: ''
+      # 默认密码：Zj2#2026
+
+    viewer:
+      name: 查看员
+      password: $2b$10$j0S1JLpJMSOuuAKp8Re8r.chg.h7YCY/hZA8JaN3bqxtb4UXxOfoK
+      email: viewer@example.com
+      first_name: ''
+      last_name: ''
+      # 默认密码：View#2026
