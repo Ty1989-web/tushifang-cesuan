@@ -136,6 +136,104 @@ OPTIONS = {
 DEFAULT_PARAMS = {k: v[2] for k, v in PARAM_MAP.items()}
 
 
+# ============================================================
+# 工艺错配惩罚体系（V8 模型外置·后置校正层）
+# ------------------------------------------------------------
+# V8 模型按用户选择直接计算，不做合理性校验；这一层在 compute()
+# 末尾做两件事：
+#   1) 根据"岩石—推荐工艺"映射识别错配
+#   2) 对挖装费应用 (1/eff + 0.3*(con-1)) 复合惩罚，并连带刷新总价
+#   3) 输出 warning 字段，前端按 severity 决定红/橙/蓝色提示
+# ============================================================
+
+# 岩石级别 → 推荐工艺（来自 V8 参数库 I3:I10）
+ROCK_RECOMMEND = {
+    'Ⅰ极软岩':     '直接开挖',
+    'Ⅱ软岩':       '松土器松土+开挖',
+    'Ⅲ较软岩':     '松土器松土+开挖',
+    'Ⅳ中硬岩':     '爆破+开挖',
+    'Ⅴ较硬岩':     '爆破+开挖',
+    'Ⅵ坚硬岩':     '爆破+开挖',
+    'Ⅶ极硬岩':     '爆破+开挖',
+    'Ⅷ特殊坚硬岩':  '爆破+二次破碎+开挖',
+}
+
+# (用户选择, 系统推荐) → (效率折减, 耗材倍率, 严重度, 说明)
+# severity: 'error'=红 / 'warning'=橙 / 'info'=蓝
+PENALTY = {
+    # ↓ "工艺不足"型偏离：用户选了更轻量的工艺，挖机硬挖
+    ('直接开挖',         '松土器松土+开挖'):    (0.8,  1.2, 'info',    '岩石较硬，挖机硬挖效率折损约 20%，建议改用松土器'),
+    ('直接开挖',         '机械破碎+开挖'):      (0.3,  3.0, 'warning', '岩石需破碎，挖机硬挖效率仅 30%，齿尖磨耗剧增'),
+    ('直接开挖',         '爆破+开挖'):         (0.1,  5.0, 'error',   '岩石需爆破，挖机几乎挖不动，齿尖暴损'),
+    ('直接开挖',         '爆破+二次破碎+开挖'): (0.08, 6.0, 'error',   '特坚岩需爆破+二次破碎，直接开挖完全不可行'),
+    ('松土器松土+开挖',   '机械破碎+开挖'):     (0.5,  2.0, 'warning', '岩石较硬，松土头磨耗剧增，效率仅 50%'),
+    ('松土器松土+开挖',   '爆破+开挖'):         (0.2,  3.0, 'error',   '岩石需爆破，松土器极不推荐，效率仅 20%'),
+    ('松土器松土+开挖',   '爆破+二次破碎+开挖'): (0.15, 4.0, 'error',  '特坚岩松土完全不可行'),
+    ('机械破碎+开挖',     '爆破+开挖'):         (0.5,  2.0, 'warning', '岩石需爆破，机械破碎效率仅 50%'),
+    ('机械破碎+开挖',     '爆破+二次破碎+开挖'): (0.4,  2.5, 'warning', '特坚岩机械破碎效率较低且大块多'),
+    ('爆破+开挖',         '爆破+二次破碎+开挖'): (0.7,  1.5, 'info',    '特坚岩建议带二次破碎，否则大块多→运输/破碎成本上升'),
+    # ↓ "工艺过剩"型偏离：杀鸡牛刀，不影响真实成本，仅提示
+    ('松土器松土+开挖',   '直接开挖'):          (1.0,  1.0, 'info', '工艺略偏保守，可改用直接开挖更经济'),
+    ('机械破碎+开挖',     '直接开挖'):          (1.0,  1.0, 'info', '工艺过剩，可改用直接开挖更经济'),
+    ('机械破碎+开挖',     '松土器松土+开挖'):    (1.0,  1.0, 'info', '工艺偏保守'),
+    ('爆破+开挖',         '直接开挖'):          (1.0,  1.0, 'info', '工艺过剩，可改用直接开挖大幅降本'),
+    ('爆破+开挖',         '松土器松土+开挖'):    (1.0,  1.0, 'info', '工艺偏保守'),
+    ('爆破+开挖',         '机械破碎+开挖'):      (1.0,  1.0, 'info', '工艺偏保守'),
+    ('爆破+二次破碎+开挖', '直接开挖'):          (1.0,  1.0, 'info', '工艺过剩'),
+    ('爆破+二次破碎+开挖', '松土器松土+开挖'):    (1.0,  1.0, 'info', '工艺过剩'),
+    ('爆破+二次破碎+开挖', '机械破碎+开挖'):      (1.0,  1.0, 'info', '工艺偏保守'),
+    ('爆破+二次破碎+开挖', '爆破+开挖'):          (1.0,  1.0, 'info', '工艺偏保守'),
+}
+
+
+def detect_mismatch(rock_level, process):
+    """识别工艺错配。返回 dict 或 None。"""
+    recommended = ROCK_RECOMMEND.get(rock_level)
+    if not recommended or process == recommended:
+        return None
+    rule = PENALTY.get((process, recommended))
+    if not rule:
+        return None
+    eff, con, sev, msg = rule
+    return {
+        'severity': sev,
+        'message': msg,
+        'process_user': process,
+        'process_recommend': recommended,
+        'rock_level': rock_level,
+        'efficiency_factor': eff,
+        'consume_factor': con,
+        'is_penalty': (eff < 1.0 or con > 1.0),
+    }
+
+
+def apply_penalty(result):
+    """在 result 上应用工艺错配惩罚，并写入 warning 字段。"""
+    inputs = result.get('inputs', {})
+    mismatch = detect_mismatch(inputs.get('rock_level'), inputs.get('process'))
+    result['warning'] = mismatch
+    if not mismatch or not mismatch['is_penalty']:
+        return result
+
+    eff = mismatch['efficiency_factor']
+    con = mismatch['consume_factor']
+    mult = (1.0 / eff) + 0.3 * (con - 1)
+    original_exc = result.get('cost_excavate') or 0
+    new_exc = original_exc * mult
+    extra = new_exc - original_exc
+
+    result['cost_excavate'] = new_exc
+    result['cost_excavate_original'] = original_exc
+    result['penalty_multiplier'] = mult
+
+    px = result.get('price_excl_tax') or 0
+    pi = result.get('price_incl_tax') or 0
+    tax_ratio = (pi / px) if px > 0 else 1.09
+    result['price_excl_tax'] = px + extra
+    result['price_incl_tax'] = (px + extra) * tax_ratio
+    return result
+
+
 # ---------- 核心：把参数应用到模板 + libreoffice 重算 ----------
 def _build_and_calc(params: Dict[str, Any], workdir: str) -> str:
     """把参数写入主表 → save → libreoffice 重算 → 返回重算后文件路径"""
@@ -196,6 +294,8 @@ def compute(params: Dict[str, Any] = None) -> Dict[str, Any]:
             v = wb[sheet][cell].value
             out[key] = v
         out['inputs'] = {**DEFAULT_PARAMS, **(params or {})}
+        # 应用工艺错配惩罚（加 warning 字段、修正挖装费和总价）
+        apply_penalty(out)
         return out
 
 
