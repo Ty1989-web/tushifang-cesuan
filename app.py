@@ -242,12 +242,17 @@ with col_result:
             )
             st.bar_chart(df.set_index('项目'))
 
-            # 惩罚说明
-            if result.get('cost_excavate_original') is not None and result.get('penalty_multiplier'):
-                orig = result['cost_excavate_original']
-                mult = result['penalty_multiplier']
+            # 工艺错配定价说明（按档位差）
+            if warning and warning.get('gap_levels'):
+                gap = warning['gap_levels']
+                baseline = warning.get('baseline_price_incl', 0)
+                factor = warning.get('adjusted_factor', 1.0)
+                adj = warning.get('adjusted_price_incl', 0)
+                v8 = warning.get('v8_original_price_incl', 0)
                 st.caption(
-                    f"📌 挖装费已应用工艺错配惩罚：原 {orig:.2f} × 惩罚倍数 {mult:.2f} = {orig*mult:.2f} 元/方"
+                    f"📌 工艺错配阶梯定价：推荐工艺基准价 **{baseline:.2f}** 元/方 × "
+                    f"档位差 **{gap}** 档系数 **{factor:.2f}** = **{adj:.2f}** 元/方"
+                    f"　（V8 原算 {v8:.2f}，仅供参考）"
                 )
 
         # —— 岩石参数联动展示 ——
@@ -272,31 +277,50 @@ with col_result:
             sev = warning.get('severity')
             ptype = warning.get('process_user', '—')
             rec = warning.get('process_recommend', '—')
-            eff = warning.get('efficiency_factor', 1.0)
-            con = warning.get('consume_factor', 1.0)
             msg = warning.get('message', '')
-            is_pen = warning.get('is_penalty')
+            gap = warning.get('gap_levels', 0)
+            factor = warning.get('adjusted_factor')
+            baseline = warning.get('baseline_price_incl')
+            adj = warning.get('adjusted_price_incl')
+            v8 = warning.get('v8_original_price_incl')
+
+            # 拼定价说明（gap > 0 才有）
+            price_detail = ""
+            if gap and factor:
+                price_detail = (
+                    f"\n- 阶梯定价：推荐工艺基准 **{baseline:.2f}** × 档位差 **{gap}** 档系数 **{factor:.2f}** = **{adj:.2f}** 元/方"
+                    f"\n- V8 原算（不考虑工艺错配）：{v8:.2f} 元/方"
+                )
 
             if sev == 'error':
                 st.error(
-                    f"🚨 **工艺错配严重警告**：当前岩石推荐 **{rec}**，您选择了 **{ptype}**。\n\n"
-                    f"- {msg}\n"
-                    f"- 效率折减系数：**{eff:.2f}**，耗材倍率：**{con:.2f}**\n"
-                    f"- ⚠️ 已自动应用惩罚倍数，挖装费大幅放大。**强烈建议改用「{rec}」**。"
+                    f"🚨 **工艺错配严重警告**：当前岩石推荐 **{rec}**，您选择了 **{ptype}**（偏软 {gap} 档）。\n\n"
+                    f"- {msg}"
+                    f"{price_detail}"
+                    f"\n- ⚠️ **强烈建议改用「{rec}」**，否则成本将大幅上升。"
                 )
             elif sev == 'warning':
                 st.warning(
-                    f"⚠️ **工艺错配警告**：当前岩石推荐 **{rec}**，您选择了 **{ptype}**。\n\n"
-                    f"- {msg}\n"
-                    f"- 效率折减系数：**{eff:.2f}**，耗材倍率：**{con:.2f}**\n"
-                    f"- 已应用惩罚倍数，实际请考虑改用「{rec}」。"
+                    f"⚠️ **工艺错配警告**：当前岩石推荐 **{rec}**，您选择了 **{ptype}**（偏软 {gap} 档）。\n\n"
+                    f"- {msg}"
+                    f"{price_detail}"
+                    f"\n- 建议考虑改用「{rec}」。"
                 )
             elif sev == 'info':
-                st.info(
-                    f"💡 工艺偏保守：当前岩石推荐 **{rec}**，您选择了 **{ptype}**。"
-                    f"{('（' + msg + '）') if msg else ''}"
-                    f"未应用惩罚，仅供参考。"
-                )
+                if gap and gap > 0:
+                    # 轻微偏软（如较软岩用直接开挖）
+                    st.info(
+                        f"💡 **工艺偏软提示**：当前岩石推荐 **{rec}**，您选择了 **{ptype}**（偏软 {gap} 档）。"
+                        f"{('（' + msg + '）') if msg else ''}"
+                        f"{price_detail}"
+                    )
+                else:
+                    # 工艺过剩/杀鸡牛刀
+                    st.info(
+                        f"💡 工艺偏保守：当前岩石推荐 **{rec}**，您选择了 **{ptype}**。"
+                        f"{('（' + msg + '）') if msg else ''}"
+                        f"未调整单价，仅供参考。"
+                    )
 
         # 2) 其他校验提示（原 warn_* 字段）
         if warns:
