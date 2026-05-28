@@ -201,8 +201,15 @@ with col_result:
         df = pd.DataFrame([(n, v) for n, v in cost_items if v not in (None, 0)],
                           columns=['项目', '元/方'])
         if not df.empty:
-            df['元/方'] = df['元/方'].astype(float).round(4)
-            st.dataframe(df, hide_index=True, use_container_width=True)
+            df['元/方'] = df['元/方'].astype(float).round(2)
+            st.dataframe(
+                df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    '元/方': st.column_config.NumberColumn('元/方', format='%.2f')
+                },
+            )
             st.bar_chart(df.set_index('项目'))
 
         # —— 岩石参数联动展示 ——
