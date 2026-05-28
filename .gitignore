@@ -1,0 +1,15 @@
+# Streamlit
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+
+# 运行时生成的临时模板（删了会自动重建）
+template_v8.xlsx
+
+# OS
+.DS_Store
+Thumbs.db
