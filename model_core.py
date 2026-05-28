@@ -158,6 +158,37 @@ ROCK_RECOMMEND = {
     'Ⅷ特殊坚硬岩':  '爆破+二次破碎+开挖',
 }
 
+# 工艺强度档位（数字越小越偷懒）
+PROCESS_LEVEL = {
+    '直接开挖':           1,
+    '松土器松土+开挖':    2,
+    '机械破碎+开挖':      3,
+    '爆破+开挖':          4,
+    '爆破+二次破碎+开挖': 5,
+}
+
+# 推荐工艺基准价（含税，元/方）—— 默认参数下 V8 算出的推荐工艺价
+# 用作工艺错配阶梯定价的锚点：错配价 = baseline × (1 + gap × 0.5)
+RECOMMEND_BASELINE_INCL = {
+    'Ⅰ极软岩':      8.92,
+    'Ⅱ软岩':       12.80,
+    'Ⅲ较软岩':     15.89,
+    'Ⅳ中硬岩':     30.01,
+    'Ⅴ较硬岩':     33.73,
+    'Ⅵ坚硬岩':     38.59,
+    'Ⅶ极硬岩':     45.27,
+    'Ⅷ特殊坚硬岩': 60.33,
+}
+
+# 工艺错配阶梯定价系数：factor = 2 ** gap
+#   差 0 档（推荐）→ ×1
+#   差 1 档 → ×2
+#   差 2 档 → ×4
+#   差 3 档 → ×8
+#   差 4 档 → ×16
+def _gap_factor(gap):
+    return 2 ** gap if gap > 0 else 1.0
+
 # (用户选择, 系统推荐) → (效率折减, 耗材倍率, 严重度, 说明)
 # severity: 'error'=红 / 'warning'=橙 / 'info'=蓝
 PENALTY = {
@@ -208,29 +239,63 @@ def detect_mismatch(rock_level, process):
 
 
 def apply_penalty(result):
-    """在 result 上应用工艺错配惩罚，并写入 warning 字段。"""
+    """工艺错配后置校正：按"工艺档位差"覆盖式定价。
+
+    业务原则：工艺越偷懒（强度越低），单价应该越贵。
+        直接开挖 > 松土器 > 机械破碎 > 爆破+开挖
+
+    实现：
+    - 每个岩石等级有「推荐工艺」和「推荐工艺基准价」
+    - 用户选其它工艺时，按档位差强制定价：基准价 × (1 + gap × 0.5)
+    - 覆盖 V8 原算，避免「V8 在硬岩+松土器自带产量罚导致单价飙到几百几千」
+      和「V8 在硬岩+直接开挖完全没罚导致直接开挖比松土器还便宜」两个 bug
+    - V8 原始价记录在 warning.v8_original_price_incl，让用户看到「原始算 763 元/方」的不可行性
+    """
     inputs = result.get('inputs', {})
-    mismatch = detect_mismatch(inputs.get('rock_level'), inputs.get('process'))
+    rock = inputs.get('rock_level')
+    proc = inputs.get('process')
+    mismatch = detect_mismatch(rock, proc)
     result['warning'] = mismatch
-    if not mismatch or not mismatch['is_penalty']:
+    if not mismatch:
         return result
 
-    eff = mismatch['efficiency_factor']
-    con = mismatch['consume_factor']
-    mult = (1.0 / eff) + 0.3 * (con - 1)
-    original_exc = result.get('cost_excavate') or 0
-    new_exc = original_exc * mult
-    extra = new_exc - original_exc
+    level_user = PROCESS_LEVEL.get(proc, 0)
+    level_rec = PROCESS_LEVEL.get(mismatch['process_recommend'], 0)
+    gap = level_rec - level_user  # 正数=用户工艺偏软（不足）
 
-    result['cost_excavate'] = new_exc
-    result['cost_excavate_original'] = original_exc
-    result['penalty_multiplier'] = mult
+    base_excl = result.get('price_excl_tax') or 0
+    base_incl = result.get('price_incl_tax') or 0
+    tax_ratio = (base_incl / base_excl) if base_excl > 0 else 1.09
 
-    px = result.get('price_excl_tax') or 0
-    pi = result.get('price_incl_tax') or 0
-    tax_ratio = (pi / px) if px > 0 else 1.09
-    result['price_excl_tax'] = px + extra
-    result['price_incl_tax'] = (px + extra) * tax_ratio
+    if gap <= 0:
+        # 工艺过剩（杀鸡牛刀）：不改价，仅提示
+        mismatch['severity'] = 'info'
+        return result
+
+    # —— 工艺不足：按档位差强制定价 ——
+    baseline_incl = RECOMMEND_BASELINE_INCL.get(rock)
+    if baseline_incl is None:
+        return result  # 安全 fallback
+    baseline_excl = baseline_incl / tax_ratio
+    factor = _gap_factor(gap)
+    target_excl = baseline_excl * factor
+    target_incl = target_excl * tax_ratio
+
+    # 记录到 warning 供 UI 显示
+    mismatch['v8_original_price_incl'] = round(base_incl, 2)
+    mismatch['baseline_price_incl'] = round(baseline_incl, 2)
+    mismatch['gap_levels'] = gap
+    mismatch['adjusted_factor'] = round(factor, 2)
+    mismatch['adjusted_price_incl'] = round(target_incl, 2)
+
+    # 增量映射到挖装费，方便成本构成图体现
+    orig_exc = result.get('cost_excavate') or 0
+    extra = target_excl - base_excl
+    result['cost_excavate_original'] = orig_exc
+    result['cost_excavate'] = orig_exc + extra
+    result['penalty_multiplier'] = factor
+    result['price_excl_tax'] = target_excl
+    result['price_incl_tax'] = target_incl
     return result
 
 
