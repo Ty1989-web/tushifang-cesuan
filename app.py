@@ -15,7 +15,11 @@ from yaml.loader import SafeLoader
 import pandas as pd
 import time
 
-from model_core import compute, export_xlsx, OPTIONS, DEFAULT_PARAMS
+from model_core import (
+    compute, export_xlsx, OPTIONS, DEFAULT_PARAMS,
+    TRUCK_INFO, DRILL_INFO,
+    drill_recommend_diameter, truck_display, drill_display,
+)
 
 # ============ 页面设置 ============
 st.set_page_config(
@@ -83,15 +87,46 @@ with col_form:
 
     # —— 设备选型 ——
     with st.expander("🚜 设备选型", expanded=True):
+        # 方案I：钻机↔孔径联动 —— 切钻机时自动把孔径跳到该钻机的推荐孔径
+        # 必须在 selectbox 渲染之前注册 on_change 回调
+        def _on_drill_change():
+            new_drill = st.session_state.get('drill_key')
+            if new_drill:
+                st.session_state['hole_diameter_key'] = drill_recommend_diameter(new_drill)
+
         c1, c2 = st.columns(2)
         with c1:
             excavator = st.selectbox("挖机型号", OPTIONS['excavator'],
                                      index=OPTIONS['excavator'].index(DEFAULT_PARAMS['excavator']))
             truck = st.selectbox("矿卡型号", OPTIONS['truck'],
                                  index=OPTIONS['truck'].index(DEFAULT_PARAMS['truck']))
+            # 方案I：矿卡 caption —— 列出每个矿卡的"载重+动力"，避免代号误导
+            _truck_info = TRUCK_INFO.get(truck)
+            if _truck_info:
+                _t_load, _t_power = _truck_info
+                _peer_lines = " / ".join(f"{c}={v[0]}t·{v[1]}" for c, v in TRUCK_INFO.items())
+                st.caption(
+                    f"💡 当前选型 **{truck}** = **{_t_load}t · {_t_power}** ｜"
+                    f"代号≠大小：T开头=柴油，E开头=纯电；纯电单方比柴油便宜约 4-5 元/方"
+                    f"（电费 vs 柴油费差价），但需充电桩配套。\n\n参数对照：{_peer_lines}"
+                )
             if needs_blast:
                 drill = st.selectbox("钻机型号", OPTIONS['drill'],
-                                     index=OPTIONS['drill'].index(DEFAULT_PARAMS['drill']))
+                                     index=OPTIONS['drill'].index(DEFAULT_PARAMS['drill']),
+                                     key='drill_key',
+                                     on_change=_on_drill_change)
+                # 方案I：钻机 caption —— 列出每个钻机的"类型+标配孔径"
+                _drill_info = DRILL_INFO.get(drill)
+                if _drill_info:
+                    _d_type, _d_rec, _d_range = _drill_info
+                    _peer_lines = " / ".join(
+                        f"{c}={v[0]}·标配{v[1]}mm" for c, v in DRILL_INFO.items()
+                    )
+                    st.caption(
+                        f"💡 当前选型 **{drill}** = **{_d_type} · 标配 {_d_rec}mm 孔径** ｜"
+                        f"⚠️ 钻机与孔径**强耦合**，切钻机时孔径已自动同步；如需手动调，请同步检查孔径。"
+                        f"\n\n参数对照：{_peer_lines}"
+                    )
             else:
                 drill = DEFAULT_PARAMS['drill']
                 st.caption("🚫 钻机型号（当前工艺不含爆破，已隐藏）")
@@ -145,8 +180,25 @@ with col_form:
                                              value=int(DEFAULT_PARAMS['hole_angle']), step=1)
                 hole_pattern = st.selectbox("布孔形式", OPTIONS['hole_pattern'],
                                             index=OPTIONS['hole_pattern'].index(DEFAULT_PARAMS['hole_pattern']))
+                # 方案I：孔径与钻机联动 —— 用 session_state key 绑定，初始化默认值
+                if 'hole_diameter_key' not in st.session_state:
+                    st.session_state['hole_diameter_key'] = DEFAULT_PARAMS['hole_diameter']
+                # 若联动回调把孔径设到了 OPTIONS 之外的值（理论不会，但兜底），夹回区间内
+                if st.session_state['hole_diameter_key'] not in OPTIONS['hole_diameter']:
+                    st.session_state['hole_diameter_key'] = DEFAULT_PARAMS['hole_diameter']
                 hole_diameter = st.selectbox("孔径 (mm)", OPTIONS['hole_diameter'],
-                                             index=OPTIONS['hole_diameter'].index(DEFAULT_PARAMS['hole_diameter']))
+                                             key='hole_diameter_key')
+                # 方案I：孔径 caption —— 提示与钻机的耦合关系
+                _drill_info_h = DRILL_INFO.get(drill)
+                if _drill_info_h:
+                    _, _d_rec_h, _d_range_h = _drill_info_h
+                    _range_str = "/".join(str(x) for x in _d_range_h) + "mm"
+                    _hint = "✅ 与钻机匹配" if hole_diameter in _d_range_h else "⚠️ 与当前钻机标配孔径不符"
+                    st.caption(
+                        f"💡 当前钻机 **{drill}** 标配 **{_d_rec_h}mm**（可用区间 {_range_str}）｜{_hint}\n\n"
+                        f"📐 工程原理：钻机和孔径**强耦合**——大钻机配小孔径=大马拉小车，"
+                        f"台班费高但钻速发挥不出来；切钻机时孔径已自动同步到标配值。"
+                    )
                 pre_split = st.radio("是否预裂", OPTIONS['pre_split'], horizontal=True,
                                      index=OPTIONS['pre_split'].index(DEFAULT_PARAMS['pre_split']))
     else:
@@ -269,10 +321,19 @@ with col_result:
             st.write(f"- 推荐挖机：**{result.get('recommend_exc', '—')}**")
             st.write(f"- 推荐矿卡：**{result.get('recommend_truck', '—')}**")
             st.write(f"- 推荐钻机：**{result.get('recommend_drill', '—')}**")
+            st.write(f"- 推荐孔径：**{result.get('recommend_hole_d', '—')} mm**")
             st.caption(
                 "💡 各设备推荐独立给出：挖机按工艺+岩石强度匹配；"
                 "矿卡按场内/场外坡度（是否下坡走纯电）+ 岩石硬度匹配；"
-                "钻机按钻孔需求匹配。"
+                "钻机按岩石硬度匹配；孔径按岩石+工艺匹配（钻机切换后会自动跳到该钻机标配孔径）。"
+            )
+            st.caption(
+                "🔋 **纯电矿卡（E 系列）单方比柴油矿卡便宜约 4–5 元/方**（电费 vs 柴油费物理差价），"
+                "但需充电桩与电网容量配套；不下坡场景默认推荐柴油，下坡场景默认推荐纯电（可借势发电）。"
+            )
+            st.caption(
+                "📐 **钻机×孔径强耦合**：大钻机配小孔径=大马拉小车（台班费高+钻速发挥不出来），"
+                "切换钻机后请保留自动跳转的标配孔径，单换钻机不换孔径反而会变贵。"
             )
 
         # —— 校验警告 ——
@@ -374,13 +435,22 @@ with col_result:
                 f"综合运距 >10km 选 <60t 矿卡 → 频繁往返效率低。"
                 f"如需匹配推荐矿卡，请参考上方「系统推荐方案」中的推荐矿卡。"
             )
+            st.caption(
+                f"🔋 **动力差额外提示**：T 系列=柴油，E 系列=纯电；"
+                f"切到同载重档的 E 系列矿卡可再节省约 **4–5 元/方**电费差（前提是有充电桩与电网容量）。"
+            )
         if warn_drill:
             user_drill = st.session_state.get('last_params', {}).get('drill', '—')
             rec_drill = result.get('recommend_drill', '—')
+            rec_hole  = result.get('recommend_hole_d', '—')
             st.warning(f"🛠️ **钻机匹配警告**：{warn_drill}")
             st.caption(
                 f"📐 对比维度：**钻机能力 ↔ 岩石硬度/钻孔需求**。"
-                f"您选的钻机：{user_drill}，推荐钻机：{rec_drill}。"
+                f"您选的钻机：{user_drill}，推荐钻机：{rec_drill}（标配孔径 {rec_hole} mm）。"
+            )
+            st.caption(
+                f"📏 **联动提示**：切到推荐钻机后系统会自动把孔径跳到标配值；"
+                f"若手动改回小孔径=大马拉小车，反而单方爆破费会升高。"
             )
         if warn_slope:
             st.warning(f"⛰️ **坡度警告**：{warn_slope}")
