@@ -252,7 +252,7 @@ with col_result:
                 st.caption(
                     f"📌 工艺错配阶梯定价：推荐工艺基准价 **{baseline:.2f}** 元/方 × "
                     f"档位差 **{gap}** 档系数 **{factor:.2f}** = **{adj:.2f}** 元/方"
-                    f"　（V8 原算 {v8:.2f}，仅供参考）"
+                    f"　（V8 按错配工艺算 {v8:.2f}，含 V8 自带产量罚，仅作对比）"
                 )
 
         # —— 岩石参数联动展示 ——
@@ -289,7 +289,7 @@ with col_result:
             if gap and factor:
                 price_detail = (
                     f"\n- 阶梯定价：推荐工艺基准 **{baseline:.2f}** × 档位差 **{gap}** 档系数 **{factor:.2f}** = **{adj:.2f}** 元/方"
-                    f"\n- V8 原算（不考虑工艺错配）：{v8:.2f} 元/方"
+                    f"\n- V8 按错配工艺算（含自带产量罚）：{v8:.2f} 元/方"
                 )
 
             if sev == 'error':
@@ -315,12 +315,41 @@ with col_result:
                         f"{price_detail}"
                     )
                 else:
-                    # 工艺过剩/杀鸡牛刀
+                    # C 类：工艺过剩/杀鸡牛刀（方案G 文案修复）
+                    excess = warning.get('excess_levels', 0)
+                    v8_actual = warning.get('v8_actual_price_incl')
+                    rec_base = warning.get('recommend_baseline_incl')
+                    overuse_detail = ""
+                    if v8_actual is not None and rec_base is not None:
+                        diff = v8_actual - rec_base
+                        sign = '+' if diff >= 0 else ''
+                        overuse_detail = (
+                            f"\n- V8 按您选的「**{ptype}**」算实际成本：**{v8_actual:.2f}** 元/方（含税）"
+                            f"\n- 推荐工艺「**{rec}**」默认参数下成本约 **{rec_base:.2f}** 元/方"
+                            f"\n- 差异约 **{sign}{diff:.2f}** 元/方，源自 V8 按不同工艺算的物料参数（松散系数、大块率、运输方量等）"
+                            f"\n- 校正层未额外加罚，**显示的就是 V8 按您选工艺算的真实成本**"
+                        )
                     st.info(
-                        f"💡 工艺偏保守：当前岩石推荐 **{rec}**，您选择了 **{ptype}**。"
+                        f"💡 **工艺过剩提示**：当前岩石推荐 **{rec}**，您选择了 **{ptype}**"
+                        f"（过剩 {excess} 档，杀鸡用牛刀）。"
                         f"{('（' + msg + '）') if msg else ''}"
-                        f"未调整单价，仅供参考。"
+                        f"{overuse_detail}"
                     )
+
+            # 方案G 新增：B 类错配补偿落点说明（让用户看清楚罚加在了哪个成本项）
+            penalty_label = warning.get('penalty_field_label')
+            penalty_extra = warning.get('penalty_extra')
+            note = warning.get('note')
+            if penalty_label and penalty_extra is not None and penalty_extra > 0:
+                st.caption(
+                    f"📍 错配补偿落点：差价 **{penalty_extra:.2f}** 元/方（不含税）"
+                    f"已加到「**{penalty_label}**」上，其他成本项保持 V8 原算真实值不变。"
+                )
+
+            # 方案G 新增：V8 模型跳过项解释（如极软岩+爆破工艺时爆破费=0）
+            skip_reason = warning.get('v8_skip_reason')
+            if skip_reason:
+                st.caption(f"ℹ️ {skip_reason}")
 
         # 2) 其他校验提示（原 warn_* 字段）
         if warns:
