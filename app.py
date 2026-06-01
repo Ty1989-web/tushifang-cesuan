@@ -267,10 +267,21 @@ with col_result:
         with st.expander("💡 系统推荐方案"):
             st.write(f"- 推荐工艺：**{result.get('recommend_process', '—')}**")
             st.write(f"- 推荐挖机：**{result.get('recommend_exc', '—')}**")
+            st.write(f"- 推荐矿卡：**{result.get('recommend_truck', '—')}**")
             st.write(f"- 推荐钻机：**{result.get('recommend_drill', '—')}**")
+            st.caption(
+                "💡 各设备推荐独立给出：挖机按工艺+岩石强度匹配；"
+                "矿卡按场内/场外坡度（是否下坡走纯电）+ 岩石硬度匹配；"
+                "钻机按钻孔需求匹配。"
+            )
 
         # —— 校验警告 ——
-        warns = [v for k, v in result.items() if k.startswith('warn_') and v and '⚠' in str(v)]
+        # 按设备/维度分组显示，让用户看清楚每条警告的对比基准
+        warn_truck = result.get('warn_truck') if (result.get('warn_truck') and '⚠' in str(result.get('warn_truck',''))) else None
+        warn_drill = result.get('warn_drill') if (result.get('warn_drill') and '⚠' in str(result.get('warn_drill',''))) else None
+        warn_slope = result.get('warn_slope') if (result.get('warn_slope') and '⚠' in str(result.get('warn_slope',''))) else None
+        warn_step  = result.get('warn_step')  if (result.get('warn_step')  and '⚠' in str(result.get('warn_step',''))) else None
+        warn_process_v8 = result.get('warn_process') if (result.get('warn_process') and '⚠' in str(result.get('warn_process',''))) else None
 
         # 1) 工艺错配警告（最显眼）
         if warning:
@@ -315,7 +326,7 @@ with col_result:
                         f"{price_detail}"
                     )
                 else:
-                    # C 类：工艺过剩/杀鸡牛刀（方案G 文案修复）
+                    # C 类：工艺过剩/杀鸡牛刀（方案H 文案修复）
                     excess = warning.get('excess_levels', 0)
                     v8_actual = warning.get('v8_actual_price_incl')
                     rec_base = warning.get('recommend_baseline_incl')
@@ -336,7 +347,7 @@ with col_result:
                         f"{overuse_detail}"
                     )
 
-            # 方案G 新增：B 类错配补偿落点说明（让用户看清楚罚加在了哪个成本项）
+            # 方案H 新增：B 类错配补偿落点说明（让用户看清楚罚加在了哪个成本项）
             penalty_label = warning.get('penalty_field_label')
             penalty_extra = warning.get('penalty_extra')
             note = warning.get('note')
@@ -346,14 +357,38 @@ with col_result:
                     f"已加到「**{penalty_label}**」上，其他成本项保持 V8 原算真实值不变。"
                 )
 
-            # 方案G 新增：V8 模型跳过项解释（如极软岩+爆破工艺时爆破费=0）
+            # 方案H 新增：V8 模型跳过项解释（如极软岩+爆破工艺时爆破费=0）
             skip_reason = warning.get('v8_skip_reason')
             if skip_reason:
                 st.caption(f"ℹ️ {skip_reason}")
 
-        # 2) 其他校验提示（原 warn_* 字段）
-        if warns:
-            st.warning("⚠️ 校验提示：\n\n" + "\n\n".join(f"- {w}" for w in warns))
+        # 2) 设备级警告：按维度分组显示（清晰告知"在跟什么比"）
+        if warn_truck:
+            user_truck = st.session_state.get('last_params', {}).get('truck', '—')
+            rec_truck = result.get('recommend_truck', '—')
+            st.warning(f"🚛 **矿卡匹配警告**：{warn_truck}")
+            st.caption(
+                f"📐 对比维度：**矿卡载重 ↔ 综合运距**（不是直接对比"
+                f"「您选的 {user_truck}」与「推荐 {rec_truck}」）。"
+                f"判定规则：综合运距 <3km 选 ≥60t 矿卡 → 大马拉小车不经济；"
+                f"综合运距 >10km 选 <60t 矿卡 → 频繁往返效率低。"
+                f"如需匹配推荐矿卡，请参考上方「系统推荐方案」中的推荐矿卡。"
+            )
+        if warn_drill:
+            user_drill = st.session_state.get('last_params', {}).get('drill', '—')
+            rec_drill = result.get('recommend_drill', '—')
+            st.warning(f"🛠️ **钻机匹配警告**：{warn_drill}")
+            st.caption(
+                f"📐 对比维度：**钻机能力 ↔ 岩石硬度/钻孔需求**。"
+                f"您选的钻机：{user_drill}，推荐钻机：{rec_drill}。"
+            )
+        if warn_slope:
+            st.warning(f"⛰️ **坡度警告**：{warn_slope}")
+        if warn_step:
+            st.warning(f"📏 **台阶/边坡警告**：{warn_step}")
+        if warn_process_v8 and not warning:
+            # V8 自带的工艺警告（若 model_core 的工艺错配校验未触发，再 fallback 显示）
+            st.warning(f"🔧 **V8 工艺校验**：{warn_process_v8}")
 
         # —— 下载 ——
         st.divider()
