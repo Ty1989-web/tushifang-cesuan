@@ -166,14 +166,29 @@ PROCESS_LEVEL = {
     '爆破+开挖':          4,
     '爆破+二次破碎+开挖': 5,
 }
-# 方案F：错配补偿落到"错配工艺主项"上
+# 方案G：错配补偿落到"错配工艺主项"上
 # —— 哪个工艺被错配选用，错配补偿就加到该工艺对应的成本项
+# 同时维护中文名映射供 UI 显示
 COST_FIELD_BY_PROCESS = {
     '直接开挖':           'cost_excavate',     # 挖机硬挖磨耗
     '松土器松土+开挖':    'cost_loosen',       # 松土器磨耗剧增
     '机械破碎+开挖':      'cost_crush',        # 破碎锤效率折损
     '爆破+开挖':          'cost_blast',        # 爆破效果不足
     '爆破+二次破碎+开挖': 'cost_second_crush', # 二次破碎不够
+}
+# 成本项中文名（供 UI 提示文案使用）
+COST_FIELD_LABEL = {
+    'cost_excavate':     '挖装费',
+    'cost_loosen':       '松土费',
+    'cost_crush':        '破碎费',
+    'cost_blast':        '爆破费',
+    'cost_second_crush': '二次破碎费',
+    'cost_transport':    '运输费',
+    'cost_dump':         '渣场费',
+}
+# 特殊映射：V8岩 + 爆破+开挖（缺二次破碎）→ 实际影响挖装磨耗，罚到挖装费
+SPECIAL_PENALTY_FIELD = {
+    ('Ⅷ特殊坚硬岩', '爆破+开挖'): 'cost_excavate',
 }
 
 # 推荐工艺基准价（含税，元/方）—— 默认参数下 V8 算出的推荐工艺价
@@ -276,12 +291,43 @@ def apply_penalty(result):
     base_incl = result.get('price_incl_tax') or 0
     tax_ratio = (base_incl / base_excl) if base_excl > 0 else 1.09
 
+    # ---- V8 模型跳过项检测（用于 UI 解释「为什么选了爆破但没爆破费」）----
+    # V8 模型 B57 公式：IF(f<2 且选爆破工艺, 0, 计算爆破费) —— f<2 时强制爆破费=0
+    # V8 模型 B62 公式：爆破+二次破碎工艺时 = 破碎费×大块率，软岩大块率≈0
+    f_value = result.get('f_value') or 0
+    skipped = []
+    if f_value > 0 and f_value < 2:
+        if proc in ('爆破+开挖', '爆破+二次破碎+开挖') and (result.get('cost_blast') or 0) == 0:
+            skipped.append('爆破费')
+        if proc == '爆破+二次破碎+开挖' and (result.get('cost_second_crush') or 0) == 0:
+            skipped.append('二次破碎费')
+    if skipped:
+        mismatch['v8_skipped_costs'] = skipped
+        mismatch['v8_skip_reason'] = (
+            f"V8 模型规则：当前岩石普氏系数 f={f_value:.2f} < 2（极软岩自带破碎），"
+            f"虽然您选择了「{proc}」，但 V8 不计算 {('、'.join(skipped))}（取 0）"
+        )
+
+    # ---- C 类：工艺过剩（杀鸡牛刀）----
+    # 校正层不改价，但记录"推荐工艺基准价"供 UI 做对比，解释为什么 V8 算出的价
+    # 和推荐工艺仍有差异（V8 按用户选的工艺真实算各项成本）
     if gap <= 0:
-        # 工艺过剩（杀鸡牛刀）：不改价，仅提示
         mismatch['severity'] = 'info'
+        # 给 C 类补上对比信息：V8 按用户工艺算的实际价 vs 推荐工艺参考价
+        recommend_baseline = RECOMMEND_BASELINE_INCL.get(rock)
+        if recommend_baseline is not None:
+            mismatch['v8_actual_price_incl'] = round(base_incl, 2)
+            mismatch['recommend_baseline_incl'] = round(recommend_baseline, 2)
+            mismatch['excess_levels'] = -gap  # 正数=用户工艺过剩档位
+            mismatch['note'] = (
+                f"工艺过剩 {-gap} 档。V8 按您选的「{proc}」算实际成本 "
+                f"{base_incl:.2f} 元/方（含税），推荐工艺「{mismatch['process_recommend']}」"
+                f"默认参数下成本约 {recommend_baseline:.2f} 元/方，"
+                f"两者差异来自 V8 模型按不同工艺算的物料参数（松散系数、大块率等）"
+            )
         return result
 
-    # —— 工艺不足：按档位差强制定价 ——
+    # ---- B 类：工艺偏软 → 按档位差强制定价 ----
     baseline_incl = RECOMMEND_BASELINE_INCL.get(rock)
     if baseline_incl is None:
         return result  # 安全 fallback
@@ -297,10 +343,14 @@ def apply_penalty(result):
     mismatch['adjusted_factor'] = round(factor, 2)
     mismatch['adjusted_price_incl'] = round(target_incl, 2)
 
-    # 方案F：错配补偿落到"错配工艺主项"上（物理纯净）
+    # 方案G：错配补偿落到"错配工艺主项"上（物理纯净）
     # —— 选错松土器就罚松土费、选错破碎就罚破碎费、选错爆破就罚爆破费
+    # —— 特殊处理：Ⅷ岩+爆破+开挖 错配本质是"缺二次破碎导致大块"，
+    #             影响的是挖装磨耗而非爆破环节本身，重定向到挖装费
     # 边界保护：当 V8 原算 ≥ 阶梯定价时按 V8 实际成本走（避免出现负数）
-    main_field = COST_FIELD_BY_PROCESS.get(proc, 'cost_excavate')
+    main_field = SPECIAL_PENALTY_FIELD.get((rock, proc)) \
+                 or COST_FIELD_BY_PROCESS.get(proc, 'cost_excavate')
+    main_label = COST_FIELD_LABEL.get(main_field, main_field)
     orig_main = result.get(main_field) or 0
     extra = target_excl - base_excl
     if extra >= 0:
@@ -308,21 +358,24 @@ def apply_penalty(result):
         result[main_field + '_original'] = orig_main
         result[main_field] = orig_main + extra
         result['penalty_field'] = main_field
+        result['penalty_field_label'] = main_label
         result['penalty_extra'] = round(extra, 4)
         result['penalty_multiplier'] = factor
         result['price_excl_tax'] = target_excl
         result['price_incl_tax'] = target_incl
         mismatch['penalty_field'] = main_field
+        mismatch['penalty_field_label'] = main_label
         mismatch['penalty_extra'] = round(extra, 2)
         mismatch['note'] = (
-            f"错配补偿 {extra:.2f} 元/方 加到「{main_field}」"
-            f"（V8原 {orig_main:.2f} → 新 {orig_main+extra:.2f}）"
+            f"错配补偿 {extra:.2f} 元/方 已加到「{main_label}」上"
+            f"（V8 原算 {orig_main:.2f} → 校正后 {orig_main+extra:.2f}）"
+            f"，其他成本项保持 V8 原算真实值不变"
         )
     else:
         # V8 原算已超过阶梯定价 → 按 V8 实际成本走（不强制下调）
         mismatch['note'] = (
-            f"V8 原算 {base_incl:.2f} 已超过阶梯定价 {target_incl:.2f}，"
-            "按 V8 实际成本计费（错配工艺实际成本更高）"
+            f"V8 按错配工艺算出 {base_incl:.2f} 元/方，已超过阶梯定价 {target_incl:.2f}，"
+            "按 V8 实际成本计费（错配工艺实际成本更高，无需额外补偿）"
         )
     return result
 
