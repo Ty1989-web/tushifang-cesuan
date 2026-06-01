@@ -102,6 +102,7 @@ OUTPUT_CELLS = {
     # 推荐
     'recommend_process':('成本汇总-测算主表', 'B13'),
     'recommend_exc':    ('成本汇总-测算主表', 'B19'),
+    'recommend_truck':  ('成本汇总-测算主表', 'B22'),
     'recommend_drill':  ('成本汇总-测算主表', 'B28'),
     # 校验警告
     'warn_process':     ('成本汇总-测算主表', 'B14'),
@@ -146,7 +147,13 @@ DEFAULT_PARAMS = {k: v[2] for k, v in PARAM_MAP.items()}
 #   3) 输出 warning 字段，前端按 severity 决定红/橙/蓝色提示
 # ============================================================
 
-# 岩石级别 → 推荐工艺（来自 V8 参数库 I3:I10）
+# 岩石级别 → 推荐工艺（**完全对齐 V8 参数库 I3:I10**）
+# 设计原则（方案H 2026-06-01）：
+#   - 工艺类型选择 ≠ 工艺参数设计
+#   - V8 已经按岩石硬度自动调整参数（装药量、孔距、钻孔速度等），成本天然不同
+#   - 错配校验只针对"工艺类型大方向不对"（用爆破打软岩 / 直接开挖打硬岩）
+#   - 大块率高是"爆破设计参数问题"，由工程师调炮孔布置，不属于工艺类型错配
+#   - 因此硬岩（含 Ⅷ岩）推荐"爆破+开挖"即合理，二次破碎不是必须
 ROCK_RECOMMEND = {
     'Ⅰ极软岩':     '直接开挖',
     'Ⅱ软岩':       '松土器松土+开挖',
@@ -155,7 +162,7 @@ ROCK_RECOMMEND = {
     'Ⅴ较硬岩':     '爆破+开挖',
     'Ⅵ坚硬岩':     '爆破+开挖',
     'Ⅶ极硬岩':     '爆破+开挖',
-    'Ⅷ特殊坚硬岩':  '爆破+二次破碎+开挖',
+    'Ⅷ特殊坚硬岩':  '爆破+开挖',
 }
 
 # 工艺强度档位（数字越小越偷懒）
@@ -166,7 +173,7 @@ PROCESS_LEVEL = {
     '爆破+开挖':          4,
     '爆破+二次破碎+开挖': 5,
 }
-# 方案G：错配补偿落到"错配工艺主项"上
+# 方案H：错配补偿落到"错配工艺主项"上
 # —— 哪个工艺被错配选用，错配补偿就加到该工艺对应的成本项
 # 同时维护中文名映射供 UI 显示
 COST_FIELD_BY_PROCESS = {
@@ -186,10 +193,9 @@ COST_FIELD_LABEL = {
     'cost_transport':    '运输费',
     'cost_dump':         '渣场费',
 }
-# 特殊映射：V8岩 + 爆破+开挖（缺二次破碎）→ 实际影响挖装磨耗，罚到挖装费
-SPECIAL_PENALTY_FIELD = {
-    ('Ⅷ特殊坚硬岩', '爆破+开挖'): 'cost_excavate',
-}
+# 方案H：撤销了 SPECIAL_PENALTY_FIELD 特殊映射
+# 错配补偿统一按 COST_FIELD_BY_PROCESS 落到"用户选的错配工艺"对应成本项
+# 不再做"物理影响"层面的猜测重定向（挖装是最末端环节，不应替别的工艺背锅）
 
 # 推荐工艺基准价（含税，元/方）—— 默认参数下 V8 算出的推荐工艺价
 # 用作工艺错配阶梯定价的锚点：错配价 = baseline × (1 + gap × 0.5)
@@ -343,13 +349,11 @@ def apply_penalty(result):
     mismatch['adjusted_factor'] = round(factor, 2)
     mismatch['adjusted_price_incl'] = round(target_incl, 2)
 
-    # 方案G：错配补偿落到"错配工艺主项"上（物理纯净）
+    # 方案H：错配补偿统一落到"用户选的错配工艺主项"上（物理纯净 + 不踩挖装）
     # —— 选错松土器就罚松土费、选错破碎就罚破碎费、选错爆破就罚爆破费
-    # —— 特殊处理：Ⅷ岩+爆破+开挖 错配本质是"缺二次破碎导致大块"，
-    #             影响的是挖装磨耗而非爆破环节本身，重定向到挖装费
+    # —— 不再做"物理影响"猜测重定向（挖装作为最末端环节不替别人背锅）
     # 边界保护：当 V8 原算 ≥ 阶梯定价时按 V8 实际成本走（避免出现负数）
-    main_field = SPECIAL_PENALTY_FIELD.get((rock, proc)) \
-                 or COST_FIELD_BY_PROCESS.get(proc, 'cost_excavate')
+    main_field = COST_FIELD_BY_PROCESS.get(proc, 'cost_excavate')
     main_label = COST_FIELD_LABEL.get(main_field, main_field)
     orig_main = result.get(main_field) or 0
     extra = target_excl - base_excl
