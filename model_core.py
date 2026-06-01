@@ -291,22 +291,22 @@ def apply_penalty(result):
     # 工程逻辑：工艺错配让挖装效率折损，差价只加到挖装费；
     # 运输/破碎/渣场是客观成本，不动。
     # 边界保护：当 V8 原算 ≥ 阶梯定价时，按 V8 实际成本走（避免负数挖装费）
-        orig_exc = result.get('cost_excavate') or 0
-        extra = target_excl - base_excl
-        if extra >= 0:
-            # 阶梯定价更贵 → 差价加到挖装费，按阶梯定价收
-            result['cost_excavate_original'] = orig_exc
-            result['cost_excavate'] = orig_exc + extra
-            result['penalty_multiplier'] = factor
-            result['price_excl_tax'] = target_excl
-            result['price_incl_tax'] = target_incl
-        else:
-            # V8 原算已超过阶梯定价 → 按 V8 实际成本走（不强制下调）
-            mismatch['note'] = (
-                f"V8 原算 {base_incl:.2f} 已超过阶梯定价 {target_incl:.2f}，"
-                "按 V8 实际成本计费（错配工艺实际成本更高）"
-            )
-        return result
+    orig_exc = result.get('cost_excavate') or 0
+    extra = target_excl - base_excl
+    if extra >= 0:
+        # 阶梯定价更贵 → 差价加到挖装费，按阶梯定价收
+        result['cost_excavate_original'] = orig_exc
+        result['cost_excavate'] = orig_exc + extra
+        result['penalty_multiplier'] = factor
+        result['price_excl_tax'] = target_excl
+        result['price_incl_tax'] = target_incl
+    else:
+        # V8 原算已超过阶梯定价 → 按 V8 实际成本走（不强制下调）
+        mismatch['note'] = (
+            f"V8 原算 {base_incl:.2f} 已超过阶梯定价 {target_incl:.2f}，"
+            "按 V8 实际成本计费（错配工艺实际成本更高）"
+        )
+    return result
 
 
 # ---------- 核心：把参数应用到模板 + libreoffice 重算 ----------
