@@ -288,24 +288,35 @@ def apply_penalty(result):
     mismatch['adjusted_factor'] = round(factor, 2)
     mismatch['adjusted_price_incl'] = round(target_incl, 2)
 
-    # 工程逻辑：工艺错配让挖装效率折损，差价只加到挖装费；
-    # 运输/破碎/渣场是客观成本，不动。
-    # 边界保护：当 V8 原算 ≥ 阶梯定价时，按 V8 实际成本走（避免负数挖装费）
+    # 方案B：挖装费 = V8原挖装 × 错配系数（物理纯净，不受运距影响）；
+    # 候选综合 = 新挖装 + 其他V8项；若候选不到阶梯定价，差价兜底补挖装。
     orig_exc = result.get('cost_excavate') or 0
-    extra = target_excl - base_excl
-    if extra >= 0:
-        # 阶梯定价更贵 → 差价加到挖装费，按阶梯定价收
-        result['cost_excavate_original'] = orig_exc
-        result['cost_excavate'] = orig_exc + extra
-        result['penalty_multiplier'] = factor
+    other_excl = base_excl - orig_exc  # 运输+破碎+渣场+其他（不含挖装）
+    exc_basic = orig_exc * factor      # 工艺错配挖装放大
+    candidate_excl = exc_basic + other_excl
+    candidate_incl = candidate_excl * tax_ratio
+    if candidate_incl < target_incl:
+        # 候选 < 阶梯定价 → 按阶梯兜底，差价补到挖装
+        topup_excl = target_excl - candidate_excl
+        result['cost_excavate'] = exc_basic + topup_excl
         result['price_excl_tax'] = target_excl
         result['price_incl_tax'] = target_incl
-    else:
-        # V8 原算已超过阶梯定价 → 按 V8 实际成本走（不强制下调）
         mismatch['note'] = (
-            f"V8 原算 {base_incl:.2f} 已超过阶梯定价 {target_incl:.2f}，"
-            "按 V8 实际成本计费（错配工艺实际成本更高）"
+            f"挖装 = V8原算{orig_exc:.2f} × 错配系数{factor:.0f} "
+            f"+ 阶梯兜底差价{topup_excl:.2f}（综合按阶梯定价收）"
         )
+    else:
+        # 候选 ≥ 阶梯定价 → 按候选走（V8原算反映真实工艺成本）
+        result['cost_excavate'] = exc_basic
+        result['price_excl_tax'] = candidate_excl
+        result['price_incl_tax'] = candidate_incl
+        mismatch['note'] = (
+            f"挖装 = V8原算{orig_exc:.2f} × 错配系数{factor:.0f}"
+            "（工艺错配实际成本已超阶梯定价）"
+        )
+    result['cost_excavate_original'] = orig_exc
+    result['cost_excavate_basic'] = exc_basic
+    result['penalty_multiplier'] = factor
     return result
 
 
