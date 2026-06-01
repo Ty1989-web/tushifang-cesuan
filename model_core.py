@@ -166,6 +166,15 @@ PROCESS_LEVEL = {
     '爆破+开挖':          4,
     '爆破+二次破碎+开挖': 5,
 }
+# 方案F：错配补偿落到"错配工艺主项"上
+# —— 哪个工艺被错配选用，错配补偿就加到该工艺对应的成本项
+COST_FIELD_BY_PROCESS = {
+    '直接开挖':           'cost_excavate',     # 挖机硬挖磨耗
+    '松土器松土+开挖':    'cost_loosen',       # 松土器磨耗剧增
+    '机械破碎+开挖':      'cost_crush',        # 破碎锤效率折损
+    '爆破+开挖':          'cost_blast',        # 爆破效果不足
+    '爆破+二次破碎+开挖': 'cost_second_crush', # 二次破碎不够
+}
 
 # 推荐工艺基准价（含税，元/方）—— 默认参数下 V8 算出的推荐工艺价
 # 用作工艺错配阶梯定价的锚点：错配价 = baseline × (1 + gap × 0.5)
@@ -288,35 +297,33 @@ def apply_penalty(result):
     mismatch['adjusted_factor'] = round(factor, 2)
     mismatch['adjusted_price_incl'] = round(target_incl, 2)
 
-    # 方案B：挖装费 = V8原挖装 × 错配系数（物理纯净，不受运距影响）；
-    # 候选综合 = 新挖装 + 其他V8项；若候选不到阶梯定价，差价兜底补挖装。
-    orig_exc = result.get('cost_excavate') or 0
-    other_excl = base_excl - orig_exc  # 运输+破碎+渣场+其他（不含挖装）
-    exc_basic = orig_exc * factor      # 工艺错配挖装放大
-    candidate_excl = exc_basic + other_excl
-    candidate_incl = candidate_excl * tax_ratio
-    if candidate_incl < target_incl:
-        # 候选 < 阶梯定价 → 按阶梯兜底，差价补到挖装
-        topup_excl = target_excl - candidate_excl
-        result['cost_excavate'] = exc_basic + topup_excl
+    # 方案F：错配补偿落到"错配工艺主项"上（物理纯净）
+    # —— 选错松土器就罚松土费、选错破碎就罚破碎费、选错爆破就罚爆破费
+    # 边界保护：当 V8 原算 ≥ 阶梯定价时按 V8 实际成本走（避免出现负数）
+    main_field = COST_FIELD_BY_PROCESS.get(proc, 'cost_excavate')
+    orig_main = result.get(main_field) or 0
+    extra = target_excl - base_excl
+    if extra >= 0:
+        # 阶梯定价更贵 → 差价加到错配主项，按阶梯定价收
+        result[main_field + '_original'] = orig_main
+        result[main_field] = orig_main + extra
+        result['penalty_field'] = main_field
+        result['penalty_extra'] = round(extra, 4)
+        result['penalty_multiplier'] = factor
         result['price_excl_tax'] = target_excl
         result['price_incl_tax'] = target_incl
+        mismatch['penalty_field'] = main_field
+        mismatch['penalty_extra'] = round(extra, 2)
         mismatch['note'] = (
-            f"挖装 = V8原算{orig_exc:.2f} × 错配系数{factor:.0f} "
-            f"+ 阶梯兜底差价{topup_excl:.2f}（综合按阶梯定价收）"
+            f"错配补偿 {extra:.2f} 元/方 加到「{main_field}」"
+            f"（V8原 {orig_main:.2f} → 新 {orig_main+extra:.2f}）"
         )
     else:
-        # 候选 ≥ 阶梯定价 → 按候选走（V8原算反映真实工艺成本）
-        result['cost_excavate'] = exc_basic
-        result['price_excl_tax'] = candidate_excl
-        result['price_incl_tax'] = candidate_incl
+        # V8 原算已超过阶梯定价 → 按 V8 实际成本走（不强制下调）
         mismatch['note'] = (
-            f"挖装 = V8原算{orig_exc:.2f} × 错配系数{factor:.0f}"
-            "（工艺错配实际成本已超阶梯定价）"
+            f"V8 原算 {base_incl:.2f} 已超过阶梯定价 {target_incl:.2f}，"
+            "按 V8 实际成本计费（错配工艺实际成本更高）"
         )
-    result['cost_excavate_original'] = orig_exc
-    result['cost_excavate_basic'] = exc_basic
-    result['penalty_multiplier'] = factor
     return result
 
 
