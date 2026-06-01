@@ -19,7 +19,33 @@ from model_core import (
     compute, export_xlsx, OPTIONS, DEFAULT_PARAMS,
     TRUCK_INFO, DRILL_INFO,
     drill_recommend_diameter, truck_display, drill_display,
+    build_audit_report,
 )
+
+# 维度 → emoji 前缀（build_audit_report 输出的 category 是纯文本，UI 层加 emoji）
+_UI_CAT_EMOJI = {
+    '工艺': '🔧', '挖机': '⛏️', '矿卡': '🚛',
+    '钻机': '🛠️', '孔径': '📏', '坡度': '⛰️', '台阶': '📐',
+}
+
+def _ui_prefix_extra_line(line: str) -> str:
+    """给 build_audit_report 输出的 process_extra_lines 加 UI emoji 前缀。"""
+    if not line:
+        return line
+    s = line.strip()
+    # 阶梯定价说明
+    if s.startswith('阶梯定价：'):
+        return '💰 ' + s
+    # 错配补偿落点
+    if s.startswith('因工艺错配补偿'):
+        return '📍 ' + s
+    # 模型规则跳过
+    if s.startswith('模型规则：'):
+        return 'ℹ️ ' + s
+    # C 类工艺过剩对比
+    if s.startswith('按您选'):
+        return '💡 ' + s
+    return s
 
 # ============ 页面设置 ============
 st.set_page_config(
@@ -308,209 +334,25 @@ with col_result:
             )
 
         # —— 工艺设备匹配度校验 ——
-        # 将推荐组合与用户选择逐项对比，不符的统一说明原因
+        # 单一数据源：直接调用 model_core.build_audit_report，与 Excel 下载共享同一份审计输出
         with st.expander("📋 工艺设备匹配度校验", expanded=True):
-            rec_process = result.get('recommend_process', '—')
-            rec_exc     = result.get('recommend_exc', '—')
-            rec_truck   = result.get('recommend_truck', '—')
-            rec_drill   = result.get('recommend_drill', '—')
-            rec_hole_d  = result.get('recommend_hole_d', '—')
-            user_params = st.session_state.get('last_params', {})
-            user_process = user_params.get('process', '—')
-            user_exc     = user_params.get('excavator', '—')
-            user_truck   = user_params.get('truck', '—')
-            user_drill   = user_params.get('drill', '—')
-            user_hole_d  = user_params.get('hole_diameter', '—')
+            audit = build_audit_report(result)
+            mismatches = audit.get('mismatches') or []
+            extra_lines = audit.get('process_extra_lines') or []
 
-            mismatches = []
-
-            # 1) 工艺
-            if user_process != rec_process:
-                gap = 0
-                if warning:
-                    gap = warning.get('gap_levels') or warning.get('excess_levels', 0)
-                # 物理不可行性提示：偏软 ≥3 档 = 弱工艺对付强岩石（如 Ⅷ 岩选直接开挖）
-                _phys_hint = ""
-                if warning and warning.get('severity') in ('error', 'warning') and gap and gap >= 3:
-                    _phys_hint = "；此组合在物理上几乎不可行（岩石过硬，弱工艺无法奏效），需按推荐工艺的代价补偿"
-                if warning and warning.get('severity') in ('error', 'warning'):
-                    reason = f"当前岩石推荐「{rec_process}」，您选了「{user_process}」（偏软 {gap} 档），成本将大幅上升{_phys_hint}"
-                elif warning and warning.get('severity') == 'info' and warning.get('excess_levels'):
-                    reason = f"当前岩石推荐「{rec_process}」，您选了「{user_process}」（过剩 {gap} 档，杀鸡用牛刀）"
-                elif warning and warning.get('severity') == 'info':
-                    reason = f"当前岩石推荐「{rec_process}」，您选了「{user_process}」（偏软 {gap} 档）"
-                else:
-                    reason = f"推荐「{rec_process}」vs 您选「{user_process}」，工艺不匹配"
-                mismatches.append(("🔧 工艺", user_process, rec_process, reason))
-
-            # 2) 挖机
-            if user_exc != rec_exc:
-                mismatches.append(("⛏️ 挖机", user_exc, rec_exc,
-                    f"推荐挖机「{rec_exc}」按工艺+岩石强度匹配；您选「{user_exc}」，可能影响挖装效率"))
-
-            # 3) 矿卡（含动力类型判断）
-            _user_t = TRUCK_INFO.get(user_truck)
-            _rec_t_code = rec_truck
-            for _code in TRUCK_INFO:
-                if _code in str(rec_truck):
-                    _rec_t_code = _code
-                    break
-            _rec_t = TRUCK_INFO.get(_rec_t_code) if _rec_t_code in TRUCK_INFO else None
-
-            if user_truck != _rec_t_code:
-                _reason_parts = []
-                if _user_t and _rec_t:
-                    _u_load, _u_power = _user_t
-                    _r_load, _r_power = _rec_t
-                    if _u_load != _r_load:
-                        _reason_parts.append(f"载重：您选 {user_truck}({_u_load}t) vs 推荐 {_rec_t_code}({_r_load}t)")
-                    if _u_power != _r_power:
-                        _reason_parts.append(
-                            f"动力：您选 {_u_power} vs 推荐 {_r_power}"
-                            + ("（纯电单方比柴油便宜约 4-5 元/方，但需充电桩配套）" if _r_power == '纯电' else "")
-                        )
-                if not _reason_parts:
-                    _reason_parts.append(f"推荐「{rec_truck}」vs 您选「{user_truck}」")
-                _dist_total = (user_params.get('dist_in', 0) or 0) + (user_params.get('dist_out', 0) or 0)
-                if _dist_total < 3 and _user_t and _user_t[0] >= 60:
-                    _reason_parts.append("综合运距 <3km + 载重 ≥60t → 大马拉小车不经济")
-                elif _dist_total > 10 and _user_t and _user_t[0] < 60:
-                    _reason_parts.append("综合运距 >10km + 载重 <60t → 频繁往返效率低")
-                mismatches.append(("🚛 矿卡", user_truck, rec_truck, "；".join(_reason_parts)))
-
-            # 4) 钻机
-            _user_d = DRILL_INFO.get(user_drill)
-            if rec_drill not in ('—', '', None) and user_drill != rec_drill:
-                _reason = f"推荐钻机「{rec_drill}」按岩石硬度匹配"
-                if _user_d:
-                    _rec_d = DRILL_INFO.get(rec_drill)
-                    if _rec_d:
-                        _reason += f"（{_rec_d[0]}·标配{_rec_d[1]}mm）"
-                    _reason += f"；您选「{user_drill}」({_user_d[0]}·标配{_user_d[1]}mm)"
-                mismatches.append(("🛠️ 钻机", user_drill, rec_drill, _reason))
-
-            # 5) 孔径（双重判断：vs 推荐孔径 + vs 钻机标配孔径）
-            if user_hole_d not in ('—', '', None) and rec_hole_d not in ('—', '', None):
-                _hole_mismatch = False
-                _hole_reasons = []
-                try:
-                    _uh = int(user_hole_d)
-                    _rh = int(rec_hole_d)
-                    if _uh != _rh:
-                        _hole_mismatch = True
-                        _diff = _uh - _rh
-                        if _diff < 0:
-                            _hole_reasons.append(
-                                f"孔径偏小：您选 {_uh}mm < 推荐 {_rh}mm，"
-                                f"单孔方量减少→每方炸药消耗增加→爆破费升高"
-                            )
-                        else:
-                            _hole_reasons.append(
-                                f"孔径偏大：您选 {_uh}mm > 推荐 {_rh}mm，"
-                                f"需确认钻机能支撑此孔径，否则大孔径+小钻机=小马拉大车"
-                            )
-                except (ValueError, TypeError):
-                    pass
-                if _user_d:
-                    _d_rec = _user_d[1]
-                    _d_range = _user_d[2]
-                    try:
-                        _uh2 = int(user_hole_d)
-                        if _uh2 != _d_rec:
-                            _hole_mismatch = True
-                            if _uh2 < _d_rec:
-                                _hole_reasons.append(
-                                    f"大马拉小车：钻机「{user_drill}」标配 {_d_rec}mm，"
-                                    f"您选 {_uh2}mm → 台班费高但钻速发挥不出来，反而贵"
-                                )
-                            elif _uh2 > _d_rec:
-                                if _uh2 not in _d_range:
-                                    _hole_reasons.append(
-                                        f"小马拉大车：钻机「{user_drill}」可用孔径 {_d_range}mm，"
-                                        f"您选 {_uh2}mm 超出范围，可能无法施工"
-                                    )
-                                else:
-                                    _hole_reasons.append(
-                                        f"钻机「{user_drill}」标配 {_d_rec}mm，"
-                                        f"您选 {_uh2}mm（在可用范围内但非标配，台班效率可能下降）"
-                                    )
-                    except (ValueError, TypeError):
-                        pass
-                if _hole_mismatch:
-                    mismatches.append(("📏 孔径", f"{user_hole_d}mm", f"{rec_hole_d}mm（推荐）", "；".join(_hole_reasons)))
-
-            # 6) 坡度
-            if result.get('warn_slope') and '⚠' in str(result.get('warn_slope', '')):
-                mismatches.append(("⛰️ 坡度", "当前设置", "合理范围", str(result['warn_slope'])))
-
-            # 7) 台阶/边坡
-            if result.get('warn_step') and '⚠' in str(result.get('warn_step', '')):
-                mismatches.append(("📏 台阶", "当前设置", "合理范围", str(result['warn_step'])))
-
-            # —— 预构造：工艺错配补偿明细（绑定到"🔧 工艺"那条 mismatch 下方显示）——
-            _process_extra_lines = []
-            if warning:
-                _gap = warning.get('gap_levels') or warning.get('excess_levels', 0)
-                _factor = warning.get('adjusted_factor')
-                _baseline = warning.get('baseline_price_incl')
-                _adj = warning.get('adjusted_price_incl')
-                _v8_raw = warning.get('v8_original_price_incl')
-                _ptype = warning.get('process_user', '—')
-                _prec = warning.get('process_recommend', '—')
-
-                # B 类（偏软）阶梯定价说明
-                if _gap and _factor and _baseline:
-                    _process_extra_lines.append(
-                        f"💰 阶梯定价：推荐工艺基准 **{_baseline:.2f}** × 档位差 **{_gap}** 档系数 **{_factor:.2f}** = **{_adj:.2f}** 元/方"
-                        + (f" ｜ 按您选工艺直接算（含产量罚）：{_v8_raw:.2f} 元/方" if _v8_raw else "")
-                    )
-
-                # B 类错配补偿落点（核心：因工艺错配补偿）
-                _p_label = warning.get('penalty_field_label')
-                _p_extra = warning.get('penalty_extra')
-                _p_orig = warning.get('penalty_field_original')
-                _p_adj  = warning.get('penalty_field_adjusted')
-                if _p_label and _p_extra is not None and _p_extra > 0:
-                    if _p_orig is not None and _p_adj is not None:
-                        _process_extra_lines.append(
-                            f"📍 **因工艺错配补偿**：**{_p_extra:.2f}** 元/方 已加到「**{_p_label}**」上"
-                            f"（原算 {_p_orig:.2f} → 校正后 {_p_adj:.2f}），"
-                            f"为反映物理不可行的真实代价（其他成本项保持原算真实值不变）"
-                        )
-                    else:
-                        _process_extra_lines.append(
-                            f"📍 **因工艺错配补偿**：**{_p_extra:.2f}** 元/方（不含税）已加到「**{_p_label}**」上，"
-                            f"为反映物理不可行的真实代价（其他成本项保持原算真实值不变）"
-                        )
-
-                # 模型规则跳过项说明（如 f<2 时爆破费=0）
-                _skip_reason = warning.get('v8_skip_reason')
-                if _skip_reason:
-                    _clean_skip = _skip_reason.replace('V8', '模型')
-                    _process_extra_lines.append(f"ℹ️ {_clean_skip}")
-
-                # C 类工艺过剩差异明细
-                if warning.get('severity') == 'info' and warning.get('excess_levels'):
-                    _v8_actual = warning.get('v8_actual_price_incl')
-                    _rec_base = warning.get('recommend_baseline_incl')
-                    if _v8_actual is not None and _rec_base is not None:
-                        _diff = _v8_actual - _rec_base
-                        _sign = '+' if _diff >= 0 else ''
-                        _process_extra_lines.append(
-                            f"💡 按您选「**{_ptype}**」算实际成本 **{_v8_actual:.2f}** vs "
-                            f"推荐「**{_prec}**」默认参数约 **{_rec_base:.2f}**，"
-                            f"差异 **{_sign}{_diff:.2f}** 元/方（未额外加罚，显示的是真实成本）"
-                        )
-
-            # 输出
             if mismatches:
-                for icon_item, user_val, rec_val, reason in mismatches:
-                    st.warning(f"{icon_item}：您选 **{user_val}** ↔ 推荐 **{rec_val}**")
-                    st.caption(f"   → {reason}")
+                for cat, user_val, rec_val, reason in mismatches:
+                    emoji = _UI_CAT_EMOJI.get(cat, '⚠️')
+                    icon_item = f"{emoji} {cat}"
+                    _u = user_val if user_val is not None else '—'
+                    _r = rec_val  if rec_val  is not None else '—'
+                    st.warning(f"{icon_item}：您选 **{_u}** ↔ 推荐 **{_r}**")
+                    if reason:
+                        st.caption(f"   → {reason}")
                     # 工艺错配补偿明细紧贴工艺那条显示
-                    if icon_item.startswith("🔧 工艺") and _process_extra_lines:
-                        for _line in _process_extra_lines:
-                            st.caption(f"   　 {_line}")
+                    if cat == '工艺' and extra_lines:
+                        for _line in extra_lines:
+                            st.caption(f"   　 {_ui_prefix_extra_line(_line)}")
             else:
                 st.success("✅ 所有工艺设备参数均与推荐方案一致，当前组合匹配度良好！")
 

@@ -35,6 +35,8 @@ for _p in (_HERE, _PARENT):
         sys.path.insert(0, _p)
 
 from openpyxl import load_workbook
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
 # ---------- 启动时生成一次模板 ----------
 _TEMPLATE_PATH = os.path.join(_HERE, 'template_v8.xlsx')
@@ -492,6 +494,220 @@ def _find_libreoffice() -> str:
     raise RuntimeError("找不到 libreoffice/soffice 命令，请先安装 libreoffice")
 
 
+# ============================================================
+# 共享审计报告构造（网页 + Excel 统一调用）
+# -----------------------------------------------------------
+# 把推荐组合 vs 用户选择的 7 维度审计逻辑集中在此，
+# app.py 的 UI 和 export_xlsx 的 Excel sheet 都调用同一个函数，
+# 保证"改一处，两端自动同步"。
+# ============================================================
+
+def build_audit_report(result: Dict[str, Any]) -> Dict[str, Any]:
+    """根据 compute() 返回的结果，构造完整的审计报告。
+
+    返回 dict 结构：
+    {
+        'mismatches': [ (维度名, 用户选, 推荐, 原因), ... ],
+        'process_extra_lines': [ str, ... ],   # 工艺错配补偿明细（紧跟工艺条目）
+        'all_match': bool,                      # 是否全部匹配
+    }
+    """
+    warning = result.get('warning') or {}
+    inputs = result.get('inputs', {})
+
+    rec_process = result.get('recommend_process', '—')
+    rec_exc     = result.get('recommend_exc', '—')
+    rec_truck   = result.get('recommend_truck', '—')
+    rec_drill   = result.get('recommend_drill', '—')
+    rec_hole_d  = result.get('recommend_hole_d', '—')
+
+    user_process = inputs.get('process', '—')
+    user_exc     = inputs.get('excavator', '—')
+    user_truck   = inputs.get('truck', '—')
+    user_drill   = inputs.get('drill', '—')
+    user_hole_d  = inputs.get('hole_diameter', '—')
+
+    mismatches = []
+
+    # 1) 工艺
+    if user_process != rec_process:
+        gap = warning.get('gap_levels') or warning.get('excess_levels', 0)
+        phys_hint = ""
+        if warning.get('severity') in ('error', 'warning') and gap and gap >= 3:
+            phys_hint = "；此组合在物理上几乎不可行（岩石过硬，弱工艺无法奏效），需按推荐工艺的代价补偿"
+        if warning.get('severity') in ('error', 'warning'):
+            reason = f"当前岩石推荐「{rec_process}」，您选了「{user_process}」（偏软 {gap} 档），成本将大幅上升{phys_hint}"
+        elif warning.get('severity') == 'info' and warning.get('excess_levels'):
+            reason = f"当前岩石推荐「{rec_process}」，您选了「{user_process}」（过剩 {gap} 档，杀鸡用牛刀）"
+        elif warning.get('severity') == 'info':
+            reason = f"当前岩石推荐「{rec_process}」，您选了「{user_process}」（偏软 {gap} 档）"
+        else:
+            reason = f"推荐「{rec_process}」vs 您选「{user_process}」，工艺不匹配"
+        mismatches.append(("工艺", user_process, rec_process, reason))
+
+    # 2) 挖机
+    if user_exc != rec_exc:
+        mismatches.append(("挖机", user_exc, rec_exc,
+            f"推荐挖机「{rec_exc}」按工艺+岩石强度匹配；您选「{user_exc}」，可能影响挖装效率"))
+
+    # 3) 矿卡（含动力类型判断）
+    user_t = TRUCK_INFO.get(user_truck)
+    rec_t_code = rec_truck
+    for _code in TRUCK_INFO:
+        if _code in str(rec_truck):
+            rec_t_code = _code
+            break
+    rec_t = TRUCK_INFO.get(rec_t_code) if rec_t_code in TRUCK_INFO else None
+
+    if user_truck != rec_t_code:
+        reason_parts = []
+        if user_t and rec_t:
+            u_load, u_power = user_t
+            r_load, r_power = rec_t
+            if u_load != r_load:
+                reason_parts.append(f"载重：您选 {user_truck}({u_load}t) vs 推荐 {rec_t_code}({r_load}t)")
+            if u_power != r_power:
+                reason_parts.append(
+                    f"动力：您选 {u_power} vs 推荐 {r_power}"
+                    + ("（纯电单方比柴油便宜约 4-5 元/方，但需充电桩配套）" if r_power == '纯电' else "")
+                )
+        if not reason_parts:
+            reason_parts.append(f"推荐「{rec_truck}」vs 您选「{user_truck}」")
+        dist_total = (inputs.get('dist_in', 0) or 0) + (inputs.get('dist_out', 0) or 0)
+        if dist_total < 3 and user_t and user_t[0] >= 60:
+            reason_parts.append("综合运距 <3km + 载重 ≥60t → 大马拉小车不经济")
+        elif dist_total > 10 and user_t and user_t[0] < 60:
+            reason_parts.append("综合运距 >10km + 载重 <60t → 频繁往返效率低")
+        mismatches.append(("矿卡", user_truck, rec_truck, "；".join(reason_parts)))
+
+    # 4) 钻机
+    user_d = DRILL_INFO.get(user_drill)
+    if rec_drill not in ('—', '', None) and user_drill != rec_drill:
+        d_reason = f"推荐钻机「{rec_drill}」按岩石硬度匹配"
+        if user_d:
+            rec_d = DRILL_INFO.get(rec_drill)
+            if rec_d:
+                d_reason += f"（{rec_d[0]}·标配{rec_d[1]}mm）"
+            d_reason += f"；您选「{user_drill}」({user_d[0]}·标配{user_d[1]}mm)"
+        mismatches.append(("钻机", user_drill, rec_drill, d_reason))
+
+    # 5) 孔径（双重判断：vs 推荐孔径 + vs 钻机标配孔径）
+    if user_hole_d not in ('—', '', None) and rec_hole_d not in ('—', '', None):
+        hole_mismatch = False
+        hole_reasons = []
+        try:
+            uh = int(user_hole_d)
+            rh = int(rec_hole_d)
+            if uh != rh:
+                hole_mismatch = True
+                diff = uh - rh
+                if diff < 0:
+                    hole_reasons.append(
+                        f"孔径偏小：您选 {uh}mm < 推荐 {rh}mm，单孔方量减少→每方炸药消耗增加→爆破费升高"
+                    )
+                else:
+                    hole_reasons.append(
+                        f"孔径偏大：您选 {uh}mm > 推荐 {rh}mm，需确认钻机能支撑此孔径，否则大孔径+小钻机=小马拉大车"
+                    )
+        except (ValueError, TypeError):
+            pass
+        if user_d:
+            d_rec = user_d[1]
+            d_range = user_d[2]
+            try:
+                uh2 = int(user_hole_d)
+                if uh2 != d_rec:
+                    hole_mismatch = True
+                    if uh2 < d_rec:
+                        hole_reasons.append(
+                            f"大马拉小车：钻机「{user_drill}」标配 {d_rec}mm，"
+                            f"您选 {uh2}mm → 台班费高但钻速发挥不出来，反而贵"
+                        )
+                    elif uh2 > d_rec:
+                        if uh2 not in d_range:
+                            hole_reasons.append(
+                                f"小马拉大车：钻机「{user_drill}」可用孔径 {d_range}mm，"
+                                f"您选 {uh2}mm 超出范围，可能无法施工"
+                            )
+                        else:
+                            hole_reasons.append(
+                                f"钻机「{user_drill}」标配 {d_rec}mm，"
+                                f"您选 {uh2}mm（在可用范围内但非标配，台班效率可能下降）"
+                            )
+            except (ValueError, TypeError):
+                pass
+        if hole_mismatch:
+            mismatches.append(("孔径", f"{user_hole_d}mm", f"{rec_hole_d}mm（推荐）", "；".join(hole_reasons)))
+
+    # 6) 坡度
+    if result.get('warn_slope') and '⚠' in str(result.get('warn_slope', '')):
+        mismatches.append(("坡度", "当前设置", "合理范围", str(result['warn_slope'])))
+
+    # 7) 台阶/边坡
+    if result.get('warn_step') and '⚠' in str(result.get('warn_step', '')):
+        mismatches.append(("台阶", "当前设置", "合理范围", str(result['warn_step'])))
+
+    # —— 工艺错配补偿明细（绑定到"工艺"那条 mismatch 下方）——
+    process_extra_lines = []
+    if warning:
+        _gap = warning.get('gap_levels') or warning.get('excess_levels', 0)
+        _factor = warning.get('adjusted_factor')
+        _baseline = warning.get('baseline_price_incl')
+        _adj = warning.get('adjusted_price_incl')
+        _v8_raw = warning.get('v8_original_price_incl')
+        _ptype = warning.get('process_user', '—')
+        _prec = warning.get('process_recommend', '—')
+
+        # B 类（偏软）阶梯定价说明
+        if _gap and _factor and _baseline:
+            process_extra_lines.append(
+                f"阶梯定价：推荐工艺基准 {_baseline:.2f} × 档位差 {_gap} 档系数 {_factor:.2f} = {_adj:.2f} 元/方"
+                + (f" ｜ 按您选工艺直接算（含产量罚）：{_v8_raw:.2f} 元/方" if _v8_raw else "")
+            )
+
+        # B 类错配补偿落点
+        _p_label = warning.get('penalty_field_label')
+        _p_extra = warning.get('penalty_extra')
+        _p_orig = warning.get('penalty_field_original')
+        _p_adj  = warning.get('penalty_field_adjusted')
+        if _p_label and _p_extra is not None and _p_extra > 0:
+            if _p_orig is not None and _p_adj is not None:
+                process_extra_lines.append(
+                    f"因工艺错配补偿：{_p_extra:.2f} 元/方 已加到「{_p_label}」上"
+                    f"（原算 {_p_orig:.2f} → 校正后 {_p_adj:.2f}），"
+                    f"为反映物理不可行的真实代价（其他成本项保持原算真实值不变）"
+                )
+            else:
+                process_extra_lines.append(
+                    f"因工艺错配补偿：{_p_extra:.2f} 元/方 已加到「{_p_label}」上，"
+                    f"为反映物理不可行的真实代价（其他成本项保持原算真实值不变）"
+                )
+
+        # 模型规则跳过项说明
+        _skip_reason = warning.get('v8_skip_reason')
+        if _skip_reason:
+            process_extra_lines.append(_skip_reason.replace('V8', '模型'))
+
+        # C 类工艺过剩差异明细
+        if warning.get('severity') == 'info' and warning.get('excess_levels'):
+            _v8_actual = warning.get('v8_actual_price_incl')
+            _rec_base = warning.get('recommend_baseline_incl')
+            if _v8_actual is not None and _rec_base is not None:
+                _diff = _v8_actual - _rec_base
+                _sign = '+' if _diff >= 0 else ''
+                process_extra_lines.append(
+                    f"按您选「{_ptype}」算实际成本 {_v8_actual:.2f} vs "
+                    f"推荐「{_prec}」默认参数约 {_rec_base:.2f}，"
+                    f"差异 {_sign}{_diff:.2f} 元/方（未额外加罚，显示的是真实成本）"
+                )
+
+    return {
+        'mismatches': mismatches,
+        'process_extra_lines': process_extra_lines,
+        'all_match': len(mismatches) == 0,
+    }
+
+
 # ---------- 对外 API ----------
 def compute(params: Dict[str, Any] = None) -> Dict[str, Any]:
     """
@@ -511,15 +727,336 @@ def compute(params: Dict[str, Any] = None) -> Dict[str, Any]:
         return out
 
 
+# -----------------------------------------------------------
+# Excel 审计 sheet 写入辅助函数
+# 让 Excel 下载和网页 UI 共享同一份 build_audit_report 输出
+# -----------------------------------------------------------
+
+_FILL_HEAD   = PatternFill('solid', fgColor='305496')   # 表头蓝
+_FILL_WARN   = PatternFill('solid', fgColor='FFF2CC')   # 警告黄
+_FILL_OK     = PatternFill('solid', fgColor='E2EFDA')   # 匹配绿
+_FILL_EXTRA  = PatternFill('solid', fgColor='FCE4D6')   # 错配补偿橙
+_FILL_NOTE   = PatternFill('solid', fgColor='F2F2F2')   # 说明灰
+_FONT_HEAD   = Font(bold=True, color='FFFFFF', size=11)
+_FONT_TITLE  = Font(bold=True, size=12, color='305496')
+_FONT_BOLD   = Font(bold=True, size=11)
+_ALIGN_WRAP  = Alignment(wrap_text=True, vertical='top', horizontal='left')
+_ALIGN_CTR   = Alignment(horizontal='center', vertical='center')
+_BORDER_THIN = Border(
+    left=Side(style='thin', color='B4B4B4'),
+    right=Side(style='thin', color='B4B4B4'),
+    top=Side(style='thin', color='B4B4B4'),
+    bottom=Side(style='thin', color='B4B4B4'),
+)
+
+# 维度 emoji（与 app.py UI 保持一致）
+_CAT_EMOJI = {
+    '工艺': '🔧', '挖机': '⛏️', '矿卡': '🚛',
+    '钻机': '🛠️', '孔径': '📏', '坡度': '⛰️', '台阶': '📐',
+}
+
+
+def _write_audit_sheet(wb, audit: Dict[str, Any], result: Dict[str, Any]) -> None:
+    """写入「📋 工艺设备匹配度校验」sheet。"""
+    sheet_name = '📋 工艺设备匹配度校验'
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+
+    # 列宽
+    ws.column_dimensions['A'].width = 14
+    ws.column_dimensions['B'].width = 26
+    ws.column_dimensions['C'].width = 26
+    ws.column_dimensions['D'].width = 60
+
+    # 标题
+    ws['A1'] = '工艺设备匹配度校验'
+    ws['A1'].font = _FONT_TITLE
+    ws.merge_cells('A1:D1')
+    ws.row_dimensions[1].height = 22
+
+    # 表头
+    headers = ['维度', '您的选择', '推荐配置', '原因说明']
+    for i, h in enumerate(headers, start=1):
+        c = ws.cell(row=2, column=i, value=h)
+        c.fill = _FILL_HEAD
+        c.font = _FONT_HEAD
+        c.alignment = _ALIGN_CTR
+        c.border = _BORDER_THIN
+    ws.row_dimensions[2].height = 22
+
+    mismatches = audit.get('mismatches') or []
+    extra_lines = audit.get('process_extra_lines') or []
+
+    row = 3
+    if not mismatches:
+        ws.cell(row=row, column=1, value='✅ 全部匹配').font = _FONT_BOLD
+        ws.cell(row=row, column=1).fill = _FILL_OK
+        ws.cell(row=row, column=2, value='').fill = _FILL_OK
+        ws.cell(row=row, column=3, value='').fill = _FILL_OK
+        ws.cell(row=row, column=4,
+                value='您选择的工艺、设备、孔径、坡度、台阶等参数与推荐组合完全一致，无需调整。').fill = _FILL_OK
+        for col in range(1, 5):
+            ws.cell(row=row, column=col).border = _BORDER_THIN
+            ws.cell(row=row, column=col).alignment = _ALIGN_WRAP
+        row += 1
+    else:
+        for cat, user_val, rec_val, reason in mismatches:
+            emoji = _CAT_EMOJI.get(cat, '⚠️')
+            ws.cell(row=row, column=1, value=f"{emoji} {cat}")
+            ws.cell(row=row, column=2, value=str(user_val) if user_val is not None else '—')
+            ws.cell(row=row, column=3, value=str(rec_val) if rec_val is not None else '—')
+            ws.cell(row=row, column=4, value=str(reason) if reason else '')
+            for col in range(1, 5):
+                cell = ws.cell(row=row, column=col)
+                cell.fill = _FILL_WARN
+                cell.border = _BORDER_THIN
+                cell.alignment = _ALIGN_WRAP
+            ws.cell(row=row, column=1).font = _FONT_BOLD
+            row += 1
+            # 工艺条目下方紧贴错配补偿明细
+            if cat == '工艺' and extra_lines:
+                for line in extra_lines:
+                    ws.cell(row=row, column=1, value='💰 补偿明细')
+                    ws.merge_cells(start_row=row, end_row=row, start_column=2, end_column=4)
+                    ws.cell(row=row, column=2, value=str(line))
+                    for col in range(1, 5):
+                        cell = ws.cell(row=row, column=col)
+                        cell.fill = _FILL_EXTRA
+                        cell.border = _BORDER_THIN
+                        cell.alignment = _ALIGN_WRAP
+                    ws.cell(row=row, column=1).font = _FONT_BOLD
+                    row += 1
+
+    # 判定依据
+    row += 1
+    ws.cell(row=row, column=1,
+            value='判定依据').font = _FONT_BOLD
+    ws.merge_cells(start_row=row, end_row=row, start_column=1, end_column=4)
+    ws.cell(row=row, column=1).fill = _FILL_NOTE
+    row += 1
+    notes = [
+        '• 推荐组合：根据岩石普氏系数（Ⅰ~Ⅷ级）自动推导，含工艺、挖机、矿卡、钻机、孔径、坡度、台阶；',
+        '• 工艺错配：偏软档位会触发"阶梯定价"补偿（×2 / ×4 / ×8 / ×16），物理不可行情况在此特别提示；',
+        '• 校正后含税单价已在「成本汇总-测算主表」B65 直接覆盖，所见即所得，无需二次重算；',
+        '• 想换工艺/设备组合得到不同单价，请回到网页修改参数后重新生成本 Excel。',
+    ]
+    for line in notes:
+        ws.cell(row=row, column=1, value=line).alignment = _ALIGN_WRAP
+        ws.merge_cells(start_row=row, end_row=row, start_column=1, end_column=4)
+        ws.cell(row=row, column=1).fill = _FILL_NOTE
+        row += 1
+
+
+def _write_correction_sheet(wb, result: Dict[str, Any], audit: Dict[str, Any]) -> None:
+    """写入「💰 校正后定价说明」sheet。"""
+    sheet_name = '💰 校正后定价说明'
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+
+    ws.column_dimensions['A'].width = 26
+    ws.column_dimensions['B'].width = 22
+    ws.column_dimensions['C'].width = 22
+    ws.column_dimensions['D'].width = 50
+
+    warning = result.get('warning') or {}
+    inputs = result.get('inputs', {})
+    rock = inputs.get('rock_level', '—')
+    proc = inputs.get('process', '—')
+    rec_proc = result.get('recommend_process', '—')
+
+    ws['A1'] = '校正后定价说明'
+    ws['A1'].font = _FONT_TITLE
+    ws.merge_cells('A1:D1')
+    ws.row_dimensions[1].height = 22
+
+    row = 2
+    # 当前定价
+    ws.cell(row=row, column=1, value='当前定价').font = _FONT_BOLD
+    ws.cell(row=row, column=1).fill = _FILL_HEAD
+    ws.cell(row=row, column=1).font = _FONT_HEAD
+    ws.merge_cells(start_row=row, end_row=row, start_column=1, end_column=4)
+    row += 1
+    pairs = [
+        ('岩石等级',   rock),
+        ('选用工艺',   proc),
+        ('推荐工艺',   rec_proc),
+        ('含税综合单价（元/方）', f"{result.get('price_incl_tax') or 0:.2f}"),
+        ('不含税综合单价（元/方）', f"{result.get('price_excl_tax') or 0:.2f}"),
+    ]
+    for k, v in pairs:
+        ws.cell(row=row, column=1, value=k).font = _FONT_BOLD
+        ws.cell(row=row, column=2, value=v)
+        ws.merge_cells(start_row=row, end_row=row, start_column=2, end_column=4)
+        for col in range(1, 5):
+            ws.cell(row=row, column=col).border = _BORDER_THIN
+            ws.cell(row=row, column=col).alignment = _ALIGN_WRAP
+        row += 1
+
+    # 错配补偿说明
+    if warning and warning.get('severity') != 'info' and warning.get('adjusted_price_incl') is not None:
+        row += 1
+        ws.cell(row=row, column=1, value='错配补偿明细').font = _FONT_HEAD
+        ws.cell(row=row, column=1).fill = _FILL_HEAD
+        ws.merge_cells(start_row=row, end_row=row, start_column=1, end_column=4)
+        row += 1
+        v8_orig = warning.get('v8_original_price_incl')
+        baseline = warning.get('baseline_price_incl')
+        gap = warning.get('gap_levels')
+        factor = warning.get('adjusted_factor')
+        adjusted = warning.get('adjusted_price_incl')
+        rows = [
+            ('V8 原算含税单价（元/方）', f"{v8_orig:.2f}" if v8_orig is not None else '—',
+             '未经校正、按用户工艺直接计算（物理上不可行，仅作参考）'),
+            ('推荐工艺基准含税单价（元/方）', f"{baseline:.2f}" if baseline is not None else '—',
+             f"推荐工艺「{rec_proc}」在 {rock} 下的基准含税单价"),
+            ('档位差', f"偏软 {gap} 档" if gap is not None else '—',
+             '工艺强度档位差：直接开挖<松土器<机械破碎<爆破+开挖'),
+            ('阶梯系数', f"×{factor:.2f}" if factor is not None else '—',
+             '档位差对应的强制定价倍率（偏1档×2 / 偏2档×4 / 偏3档×8 / 偏4档×16）'),
+            ('校正后含税单价（元/方）', f"{adjusted:.2f}" if adjusted is not None else '—',
+             '基准单价 × 阶梯系数，已覆盖到「成本汇总-测算主表」B65'),
+        ]
+        for k, v, note in rows:
+            ws.cell(row=row, column=1, value=k).font = _FONT_BOLD
+            ws.cell(row=row, column=2, value=v)
+            ws.cell(row=row, column=3, value='')
+            ws.cell(row=row, column=4, value=note)
+            for col in range(1, 5):
+                cell = ws.cell(row=row, column=col)
+                cell.fill = _FILL_EXTRA
+                cell.border = _BORDER_THIN
+                cell.alignment = _ALIGN_WRAP
+            row += 1
+
+        # 错配补偿落点
+        pen_label = warning.get('penalty_field_label')
+        pen_orig  = warning.get('penalty_field_original')
+        pen_adj   = warning.get('penalty_field_adjusted')
+        pen_extra = warning.get('penalty_extra')
+        if pen_label and pen_orig is not None and pen_adj is not None:
+            row += 1
+            ws.cell(row=row, column=1, value='错配补偿落点').font = _FONT_BOLD
+            ws.merge_cells(start_row=row, end_row=row, start_column=1, end_column=4)
+            ws.cell(row=row, column=1).fill = _FILL_NOTE
+            row += 1
+            落点行 = [
+                ('补偿挂在哪个成本项', pen_label),
+                ('原算值（元/方）', f"{pen_orig:.2f}"),
+                ('校正后值（元/方）', f"{pen_adj:.2f}"),
+                ('增量（元/方）', f"+{pen_extra:.2f}" if pen_extra is not None else '—'),
+            ]
+            for k, v in 落点行:
+                ws.cell(row=row, column=1, value=k).font = _FONT_BOLD
+                ws.cell(row=row, column=2, value=v)
+                ws.merge_cells(start_row=row, end_row=row, start_column=2, end_column=4)
+                for col in range(1, 5):
+                    ws.cell(row=row, column=col).border = _BORDER_THIN
+                    ws.cell(row=row, column=col).alignment = _ALIGN_WRAP
+                row += 1
+
+    # C 类工艺过剩说明
+    elif warning and warning.get('severity') == 'info' and warning.get('excess_levels'):
+        row += 1
+        ws.cell(row=row, column=1, value='工艺过剩说明').font = _FONT_HEAD
+        ws.cell(row=row, column=1).fill = _FILL_HEAD
+        ws.merge_cells(start_row=row, end_row=row, start_column=1, end_column=4)
+        row += 1
+        note_text = warning.get('note', '')
+        ws.cell(row=row, column=1, value=note_text).alignment = _ALIGN_WRAP
+        ws.merge_cells(start_row=row, end_row=row, start_column=1, end_column=4)
+        ws.cell(row=row, column=1).fill = _FILL_EXTRA
+        ws.cell(row=row, column=1).border = _BORDER_THIN
+        row += 1
+
+    # 模型跳过提示
+    skipped = warning.get('v8_skipped_costs') if warning else None
+    if skipped:
+        row += 1
+        ws.cell(row=row, column=1, value='模型跳过的成本项').font = _FONT_BOLD
+        ws.cell(row=row, column=1).fill = _FILL_NOTE
+        ws.merge_cells(start_row=row, end_row=row, start_column=1, end_column=4)
+        row += 1
+        ws.cell(row=row, column=1, value=warning.get('v8_skip_reason', '')).alignment = _ALIGN_WRAP
+        ws.merge_cells(start_row=row, end_row=row, start_column=1, end_column=4)
+        ws.cell(row=row, column=1).fill = _FILL_NOTE
+        row += 1
+
+    # 兜底说明
+    row += 1
+    notes = [
+        '• 主表 B64/B65 已直接显示校正后单价，与网页端「💵 校正后含税综合单价」一致；',
+        '• 若想换组合得到不同单价，请回到网页修改参数后重新下载本 Excel。',
+    ]
+    for line in notes:
+        ws.cell(row=row, column=1, value=line).alignment = _ALIGN_WRAP
+        ws.merge_cells(start_row=row, end_row=row, start_column=1, end_column=4)
+        ws.cell(row=row, column=1).fill = _FILL_NOTE
+        row += 1
+
+
 def export_xlsx(params: Dict[str, Any] = None) -> bytes:
     """
-    给一组用户参数，返回完整 xlsx 字节流（含所有 8 个 sheet + 公式计算后的值）
-    可直接放进 Streamlit 的 st.download_button(data=...)
+    给一组用户参数，返回完整 xlsx 字节流。
+
+    单一数据源原则：与 compute() 共享 _build_and_calc + apply_penalty + build_audit_report，
+    所以 Excel 下载里的「校正后单价」「工艺设备匹配度校验」永远和网页 UI 同步。
+    具体步骤：
+        1. _build_and_calc 跑 libreoffice 重算（拿到 V8 原算值缓存）
+        2. openpyxl data_only=True 读出 OUTPUT_CELLS 全部值，塞进 out dict
+        3. apply_penalty(out) 校正含税单价 + 错配补偿落点
+        4. build_audit_report(out) 构造 7 维度审计
+        5. openpyxl data_only=False 重新加载，覆盖主表关键单元格（B64/B65 + penalty_field）
+        6. 追加「📋 工艺设备匹配度校验」「💰 校正后定价说明」两个 sheet
+        7. BytesIO 保存返回字节流
     """
+    params = params or {}
     with tempfile.TemporaryDirectory() as workdir:
-        recalc_path = _build_and_calc(params or {}, workdir)
-        with open(recalc_path, 'rb') as f:
-            return f.read()
+        recalc_path = _build_and_calc(params, workdir)
+
+        # ① 读出 V8 原算值
+        wb_ro = load_workbook(recalc_path, data_only=True)
+        out: Dict[str, Any] = {}
+        for key, (sheet, cell) in OUTPUT_CELLS.items():
+            try:
+                out[key] = wb_ro[sheet][cell].value
+            except Exception:
+                out[key] = None
+        out['inputs'] = {**DEFAULT_PARAMS, **params}
+        wb_ro.close()
+
+        # ② 校正 + 审计（与网页同源）
+        apply_penalty(out)
+        audit = build_audit_report(out)
+
+        # ③ 覆盖主表关键单元格
+        wb = load_workbook(recalc_path, data_only=False)
+        main_sheet = '成本汇总-测算主表'
+        if main_sheet in wb.sheetnames:
+            ws_main = wb[main_sheet]
+            # B64 / B65 必覆盖（校正后含税/不含税）
+            if out.get('price_excl_tax') is not None:
+                ws_main['B64'] = float(out['price_excl_tax'])
+            if out.get('price_incl_tax') is not None:
+                ws_main['B65'] = float(out['price_incl_tax'])
+            # 错配补偿落点覆盖
+            warning = out.get('warning') or {}
+            pen_field = warning.get('penalty_field') or out.get('penalty_field')
+            if pen_field and pen_field in OUTPUT_CELLS:
+                _sheet, _cell = OUTPUT_CELLS[pen_field]
+                if _sheet == main_sheet and out.get(pen_field) is not None:
+                    ws_main[_cell] = float(out[pen_field])
+
+        # ④ 写两个审计 sheet
+        _write_audit_sheet(wb, audit, out)
+        _write_correction_sheet(wb, out, audit)
+
+        # ⑤ 保存到字节流
+        buf = io.BytesIO()
+        wb.save(buf)
+        wb.close()
+        return buf.getvalue()
 
 
 # ---------- 自检 ----------
