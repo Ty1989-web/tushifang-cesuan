@@ -775,20 +775,30 @@ def _write_audit_sheet(wb, audit: Dict[str, Any], result: Dict[str, Any]) -> Non
     ws.merge_cells('A1:D1')
     ws.row_dimensions[1].height = 22
 
-    # 表头
+    # 快照提示
+    ws['A2'] = ('⚠️ 本表是您下载时的参数快照；如在 Excel 中修改了岩石/工艺等参数，'
+                '主表 B65「综合单价(含税)」会自动重算，但本审计表不会跟着变——'
+                '想看新参数的校验，请回网页修改参数后重新下载。')
+    ws['A2'].font = Font(italic=True, color='C00000', size=10)
+    ws['A2'].alignment = _ALIGN_WRAP
+    ws['A2'].fill = _FILL_NOTE
+    ws.merge_cells('A2:D2')
+    ws.row_dimensions[2].height = 36
+
+    # 表头（A2 是快照提示，表头顺延到第 3 行）
     headers = ['维度', '您的选择', '推荐配置', '原因说明']
     for i, h in enumerate(headers, start=1):
-        c = ws.cell(row=2, column=i, value=h)
+        c = ws.cell(row=3, column=i, value=h)
         c.fill = _FILL_HEAD
         c.font = _FONT_HEAD
         c.alignment = _ALIGN_CTR
         c.border = _BORDER_THIN
-    ws.row_dimensions[2].height = 22
+    ws.row_dimensions[3].height = 22
 
     mismatches = audit.get('mismatches') or []
     extra_lines = audit.get('process_extra_lines') or []
 
-    row = 3
+    row = 4
     if not mismatches:
         ws.cell(row=row, column=1, value='✅ 全部匹配').font = _FONT_BOLD
         ws.cell(row=row, column=1).fill = _FILL_OK
@@ -871,7 +881,17 @@ def _write_correction_sheet(wb, result: Dict[str, Any], audit: Dict[str, Any]) -
     ws.merge_cells('A1:D1')
     ws.row_dimensions[1].height = 22
 
-    row = 2
+    # 快照提示
+    ws['A2'] = ('⚠️ 本表是您下载时的参数快照；如在 Excel 中修改了岩石/工艺等参数，'
+                '主表 B65 会自动重算，但本说明表不会跟着更新——'
+                '校正过程的实时数值请看主表 D64:G70 区。')
+    ws['A2'].font = Font(italic=True, color='C00000', size=10)
+    ws['A2'].alignment = _ALIGN_WRAP
+    ws['A2'].fill = _FILL_NOTE
+    ws.merge_cells('A2:D2')
+    ws.row_dimensions[2].height = 36
+
+    row = 3
     # 当前定价
     ws.cell(row=row, column=1, value='当前定价').font = _FONT_BOLD
     ws.cell(row=row, column=1).fill = _FILL_HEAD
@@ -996,26 +1016,146 @@ def _write_correction_sheet(wb, result: Dict[str, Any], audit: Dict[str, Any]) -
         row += 1
 
 
+def _inject_correction_layer(wb) -> None:
+    """把校正逻辑注入 Excel：写入隐藏配置 sheet + 改主表 B65 为校正后活公式。
+
+    单一数据源核心：RECOMMEND_BASELINE_INCL / PROCESS_LEVEL 来自 model_core.py，
+    每次生成 Excel 都会写最新值到「⚙️校正配置」sheet；
+    主表 B65 公式 VLOOKUP 这张配置 sheet，所以 model_core 改了基准价/工艺等级，
+    用户拿到的 Excel 在本地改参数算出来的结果也会跟着变。
+
+    主表改动（保留所有 V8 原算公式作为基础）：
+        B65 公式从 "=B64*(1+税率)"
+        改为 "=IF(校正条件, MAX(基准价×系数, V8原算含税), V8原算含税)"
+
+    在主表 D66:E68 区追加可见的"校正过程说明"（供用户理解阶梯定价是怎么算出来的）。
+    """
+    main_sheet_name = '成本汇总-测算主表'
+    cfg_sheet_name = '⚙️校正配置'
+
+    # ① 隐藏配置 sheet（如已存在先删）
+    if cfg_sheet_name in wb.sheetnames:
+        del wb[cfg_sheet_name]
+    cfg = wb.create_sheet(cfg_sheet_name)
+    cfg.sheet_state = 'hidden'
+
+    # 标题
+    cfg['A1'] = '岩石级别'
+    cfg['B1'] = '推荐工艺基准含税价(元/方)'
+    cfg['D1'] = '工艺名称'
+    cfg['E1'] = '工艺强度等级'
+    cfg['G1'] = '税率'
+    for c in ('A1', 'B1', 'D1', 'E1', 'G1'):
+        cfg[c].font = _FONT_BOLD
+
+    # 8 档岩石基准含税价
+    for i, (rock, price) in enumerate(RECOMMEND_BASELINE_INCL.items(), start=2):
+        cfg.cell(row=i, column=1, value=rock)
+        cfg.cell(row=i, column=2, value=float(price))
+
+    # 工艺强度等级
+    for i, (proc, lv) in enumerate(PROCESS_LEVEL.items(), start=2):
+        cfg.cell(row=i, column=4, value=proc)
+        cfg.cell(row=i, column=5, value=int(lv))
+
+    # 税率（从主参数库读，便于联动）
+    cfg['G2'] = "='基础核心-参数库'!$B$20"
+
+    # 列宽
+    cfg.column_dimensions['A'].width = 16
+    cfg.column_dimensions['B'].width = 28
+    cfg.column_dimensions['D'].width = 22
+    cfg.column_dimensions['E'].width = 14
+    cfg.column_dimensions['G'].width = 10
+
+    # 顶部使用说明
+    cfg['A12'] = '说明：本 sheet 由 model_core.py 自动生成，请勿手动修改。'
+    cfg['A13'] = '主表 B65「综合单价(含税)」公式会从本表读取基准价和工艺等级，'
+    cfg['A14'] = '在用户改了岩石级别/工艺类型后自动重算"阶梯定价校正"。'
+    for r in (12, 13, 14):
+        cfg.cell(row=r, column=1).alignment = _ALIGN_WRAP
+
+    # ② 改造主表 B65 为校正后活公式（其他单元格保持 V8 原算公式不动）
+    if main_sheet_name not in wb.sheetnames:
+        return
+    ws = wb[main_sheet_name]
+
+    cfg_q = f"'{cfg_sheet_name}'"
+    # 公式片段
+    f_v8_excl = "SUM(B57:B63)"
+    f_v8_incl = f"{f_v8_excl}*(1+'基础核心-参数库'!$B$20)"
+    f_user_lv = f"IFERROR(VLOOKUP(B12,{cfg_q}!$D$2:$E$6,2,0),0)"
+    f_rec_lv  = f"IFERROR(VLOOKUP(B13,{cfg_q}!$D$2:$E$6,2,0),0)"
+    f_gap     = f"MAX(0,({f_rec_lv})-({f_user_lv}))"
+    f_factor  = f"IF({f_gap}>0,POWER(2,{f_gap}),1)"
+    f_base    = f"IFERROR(VLOOKUP(B4,{cfg_q}!$A$2:$B$9,2,0),0)"
+    f_correct = f"MAX({f_base}*{f_factor},{f_v8_incl})"
+
+    # B64：综合单价(不含税) → 校正后/(1+税率)（错配时）或 V8 原算之和（无错配时）
+    ws['B64'] = f"=IF({f_gap}>0,{f_correct}/(1+'基础核心-参数库'!$B$20),{f_v8_excl})"
+    # B65：综合单价(含税) → 校正后含税（错配时）或 V8 原算含税（无错配时）
+    ws['B65'] = f"=IF({f_gap}>0,{f_correct},{f_v8_incl})"
+
+    # 标记 B64/B65 是校正后数字（视觉提示）
+    ws['B64'].fill = _FILL_OK
+    ws['B65'].fill = _FILL_OK
+    ws['B65'].font = Font(bold=True, color='C00000', size=12)
+
+    # ③ 主表 D-G 列追加"校正过程说明"区，让用户能看到计算依据
+    # 不动 A-C 已有 V8 行布局，把说明区放到 D64:G70
+    ws['D64'] = '校正过程（改岩石/工艺自动重算）'
+    ws['D64'].font = _FONT_TITLE
+    ws.merge_cells('D64:G64')
+
+    rows = [
+        ('推荐基准含税价(元/方)', f"={f_base}"),
+        ('您工艺强度等级',        f"={f_user_lv}"),
+        ('推荐工艺强度等级',      f"={f_rec_lv}"),
+        ('档位差(偏软档数)',      f"={f_gap}"),
+        ('阶梯系数(2^档位差)',    f"={f_factor}"),
+        ('V8 原算含税(元/方)',    f"={f_v8_incl}"),
+    ]
+    for i, (label, formula) in enumerate(rows, start=65):
+        ws.cell(row=i, column=4, value=label).font = _FONT_BOLD
+        ws.cell(row=i, column=4).alignment = _ALIGN_WRAP
+        ws.cell(row=i, column=4).fill = _FILL_NOTE
+        ws.cell(row=i, column=5, value=formula)
+        ws.cell(row=i, column=5).alignment = _ALIGN_WRAP
+        ws.cell(row=i, column=5).fill = _FILL_NOTE
+        ws.merge_cells(start_row=i, end_row=i, start_column=5, end_column=7)
+
+    # 列宽（仅当宽度未设过时设置）
+    try:
+        ws.column_dimensions['D'].width = max(ws.column_dimensions['D'].width or 0, 26)
+        ws.column_dimensions['E'].width = max(ws.column_dimensions['E'].width or 0, 16)
+    except Exception:
+        ws.column_dimensions['D'].width = 26
+        ws.column_dimensions['E'].width = 16
+
+
 def export_xlsx(params: Dict[str, Any] = None) -> bytes:
     """
-    给一组用户参数，返回完整 xlsx 字节流。
+    给一组用户参数，返回完整 xlsx 字节流（**交互式版本**）。
 
-    单一数据源原则：与 compute() 共享 _build_and_calc + apply_penalty + build_audit_report，
-    所以 Excel 下载里的「校正后单价」「工艺设备匹配度校验」永远和网页 UI 同步。
+    交互特性：用户拿到 Excel 后，改岩石/工艺/钻孔/运距等任何参数，
+    Excel 会自动重算 B65「综合单价(含税)」，**含校正层（阶梯定价）也会自动跟着算**。
+
+    单一数据源：RECOMMEND_BASELINE_INCL / PROCESS_LEVEL 来自 model_core.py，
+    生成 Excel 时写进隐藏配置 sheet「⚙️校正配置」，所以 model_core 改了基准价/工艺等级，
+    用户下载新版 Excel 后改参数算出来的结果也会跟着 model_core 走。
+
     具体步骤：
-        1. _build_and_calc 跑 libreoffice 重算（拿到 V8 原算值缓存）
-        2. openpyxl data_only=True 读出 OUTPUT_CELLS 全部值，塞进 out dict
-        3. apply_penalty(out) 校正含税单价 + 错配补偿落点
-        4. build_audit_report(out) 构造 7 维度审计
-        5. openpyxl data_only=False 重新加载，覆盖主表关键单元格（B64/B65 + penalty_field）
-        6. 追加「📋 工艺设备匹配度校验」「💰 校正后定价说明」两个 sheet
-        7. BytesIO 保存返回字节流
+        1. _build_and_calc 跑 libreoffice 重算（拿到 V8 原算公式缓存）
+        2. 读出 OUTPUT_CELLS 用于构造审计 sheet（这部分仍是"下载时快照"）
+        3. _inject_correction_layer 注入校正活公式 + 隐藏配置 sheet（核心交互能力）
+        4. 追加「📋 工艺设备匹配度校验」「💰 校正后定价说明」两个 sheet（快照）
+        5. BytesIO 保存返回字节流
     """
     params = params or {}
     with tempfile.TemporaryDirectory() as workdir:
         recalc_path = _build_and_calc(params, workdir)
 
-        # ① 读出 V8 原算值
+        # ① 读出 V8 原算值（用于审计 sheet 的"下载时快照"）
         wb_ro = load_workbook(recalc_path, data_only=True)
         out: Dict[str, Any] = {}
         for key, (sheet, cell) in OUTPUT_CELLS.items():
@@ -1026,33 +1166,21 @@ def export_xlsx(params: Dict[str, Any] = None) -> bytes:
         out['inputs'] = {**DEFAULT_PARAMS, **params}
         wb_ro.close()
 
-        # ② 校正 + 审计（与网页同源）
+        # ② 校正 + 审计（与网页同源，用于审计 sheet 快照）
         apply_penalty(out)
         audit = build_audit_report(out)
 
-        # ③ 覆盖主表关键单元格
+        # ③ 重新打开（保留公式），注入校正层活公式 + 写审计 sheet
         wb = load_workbook(recalc_path, data_only=False)
-        main_sheet = '成本汇总-测算主表'
-        if main_sheet in wb.sheetnames:
-            ws_main = wb[main_sheet]
-            # B64 / B65 必覆盖（校正后含税/不含税）
-            if out.get('price_excl_tax') is not None:
-                ws_main['B64'] = float(out['price_excl_tax'])
-            if out.get('price_incl_tax') is not None:
-                ws_main['B65'] = float(out['price_incl_tax'])
-            # 错配补偿落点覆盖
-            warning = out.get('warning') or {}
-            pen_field = warning.get('penalty_field') or out.get('penalty_field')
-            if pen_field and pen_field in OUTPUT_CELLS:
-                _sheet, _cell = OUTPUT_CELLS[pen_field]
-                if _sheet == main_sheet and out.get(pen_field) is not None:
-                    ws_main[_cell] = float(out[pen_field])
 
-        # ④ 写两个审计 sheet
+        # 核心：把校正逻辑做成活公式 → Excel 改参数能自动重算
+        _inject_correction_layer(wb)
+
+        # 审计 sheet 仍是"下载时快照"
         _write_audit_sheet(wb, audit, out)
         _write_correction_sheet(wb, out, audit)
 
-        # ⑤ 保存到字节流
+        # ④ 保存到字节流
         buf = io.BytesIO()
         wb.save(buf)
         wb.close()
