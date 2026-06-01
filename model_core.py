@@ -369,8 +369,8 @@ def apply_penalty(result):
     if skipped:
         mismatch['v8_skipped_costs'] = skipped
         mismatch['v8_skip_reason'] = (
-            f"V8 模型规则：当前岩石普氏系数 f={f_value:.2f} < 2（极软岩自带破碎），"
-            f"虽然您选择了「{proc}」，但 V8 不计算 {('、'.join(skipped))}（取 0）"
+            f"模型规则：当前岩石普氏系数 f={f_value:.2f} < 2（极软岩自带破碎），"
+            f"虽然您选择了「{proc}」，但模型不计算 {('、'.join(skipped))}（取 0）"
         )
 
     # ---- C 类：工艺过剩（杀鸡牛刀）----
@@ -385,10 +385,10 @@ def apply_penalty(result):
             mismatch['recommend_baseline_incl'] = round(recommend_baseline, 2)
             mismatch['excess_levels'] = -gap  # 正数=用户工艺过剩档位
             mismatch['note'] = (
-                f"工艺过剩 {-gap} 档。V8 按您选的「{proc}」算实际成本 "
+                f"工艺过剩 {-gap} 档。按您选的「{proc}」算实际成本 "
                 f"{base_incl:.2f} 元/方（含税），推荐工艺「{mismatch['process_recommend']}」"
                 f"默认参数下成本约 {recommend_baseline:.2f} 元/方，"
-                f"两者差异来自 V8 模型按不同工艺算的物料参数（松散系数、大块率等）"
+                f"两者差异来自不同工艺算的物料参数（松散系数、大块率等）"
             )
         return result
 
@@ -429,16 +429,19 @@ def apply_penalty(result):
         mismatch['penalty_field'] = main_field
         mismatch['penalty_field_label'] = main_label
         mismatch['penalty_extra'] = round(extra, 2)
+        # 独立字段：让 UI 能精确取到"原算/校正后"两个具体数值
+        mismatch['penalty_field_original'] = round(orig_main, 2)
+        mismatch['penalty_field_adjusted'] = round(orig_main + extra, 2)
         mismatch['note'] = (
             f"错配补偿 {extra:.2f} 元/方 已加到「{main_label}」上"
-            f"（V8 原算 {orig_main:.2f} → 校正后 {orig_main+extra:.2f}）"
-            f"，其他成本项保持 V8 原算真实值不变"
+            f"（原算 {orig_main:.2f} → 校正后 {orig_main+extra:.2f}）"
+            f"，其他成本项保持原算真实值不变"
         )
     else:
-        # V8 原算已超过阶梯定价 → 按 V8 实际成本走（不强制下调）
+        # 原算已超过阶梯定价 → 按实际成本走（不强制下调）
         mismatch['note'] = (
-            f"V8 按错配工艺算出 {base_incl:.2f} 元/方，已超过阶梯定价 {target_incl:.2f}，"
-            "按 V8 实际成本计费（错配工艺实际成本更高，无需额外补偿）"
+            f"按错配工艺直接算出 {base_incl:.2f} 元/方，已超过阶梯定价 {target_incl:.2f}，"
+            "按实际成本计费（错配工艺实际成本更高，无需额外补偿）"
         )
     return result
 

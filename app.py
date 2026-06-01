@@ -56,7 +56,7 @@ username = st.session_state['username']
 col_title, col_user = st.columns([4, 1])
 with col_title:
     st.title("⛏️ 大型土石方成本测算")
-    st.caption("基于 V8 模型 · 含税综合单价实时计算")
+    st.caption("含税综合单价实时计算")
 with col_user:
     st.write(f"👤 **{name}**")
     authenticator.logout(button_name='登出', location='main')
@@ -87,6 +87,10 @@ with col_form:
 
     # —— 设备选型 ——
     with st.expander("🚜 设备选型", expanded=True):
+        st.caption(
+            "ℹ️ 设备和孔径**可任意自由组合**（允许大马拉小车 / 小马拉大车），"
+            "匹配度与原因说明统一在页面底部「📋 工艺设备匹配度校验」展示。"
+        )
         # 方案I：钻机↔孔径联动 —— 切钻机时自动把孔径跳到该钻机的推荐孔径
         # 必须在 selectbox 渲染之前注册 on_change 回调
         def _on_drill_change():
@@ -100,33 +104,11 @@ with col_form:
                                      index=OPTIONS['excavator'].index(DEFAULT_PARAMS['excavator']))
             truck = st.selectbox("矿卡型号", OPTIONS['truck'],
                                  index=OPTIONS['truck'].index(DEFAULT_PARAMS['truck']))
-            # 方案I：矿卡 caption —— 列出每个矿卡的"载重+动力"，避免代号误导
-            _truck_info = TRUCK_INFO.get(truck)
-            if _truck_info:
-                _t_load, _t_power = _truck_info
-                _peer_lines = " / ".join(f"{c}={v[0]}t·{v[1]}" for c, v in TRUCK_INFO.items())
-                st.caption(
-                    f"💡 当前选型 **{truck}** = **{_t_load}t · {_t_power}** ｜"
-                    f"代号≠大小：T开头=柴油，E开头=纯电；纯电单方比柴油便宜约 4-5 元/方"
-                    f"（电费 vs 柴油费差价），但需充电桩配套。\n\n参数对照：{_peer_lines}"
-                )
             if needs_blast:
                 drill = st.selectbox("钻机型号", OPTIONS['drill'],
                                      index=OPTIONS['drill'].index(DEFAULT_PARAMS['drill']),
                                      key='drill_key',
                                      on_change=_on_drill_change)
-                # 方案I：钻机 caption —— 列出每个钻机的"类型+标配孔径"
-                _drill_info = DRILL_INFO.get(drill)
-                if _drill_info:
-                    _d_type, _d_rec, _d_range = _drill_info
-                    _peer_lines = " / ".join(
-                        f"{c}={v[0]}·标配{v[1]}mm" for c, v in DRILL_INFO.items()
-                    )
-                    st.caption(
-                        f"💡 当前选型 **{drill}** = **{_d_type} · 标配 {_d_rec}mm 孔径** ｜"
-                        f"⚠️ 钻机与孔径**强耦合**，切钻机时孔径已自动同步；如需手动调，请同步检查孔径。"
-                        f"\n\n参数对照：{_peer_lines}"
-                    )
             else:
                 drill = DEFAULT_PARAMS['drill']
                 st.caption("🚫 钻机型号（当前工艺不含爆破，已隐藏）")
@@ -188,17 +170,6 @@ with col_form:
                     st.session_state['hole_diameter_key'] = DEFAULT_PARAMS['hole_diameter']
                 hole_diameter = st.selectbox("孔径 (mm)", OPTIONS['hole_diameter'],
                                              key='hole_diameter_key')
-                # 方案I：孔径 caption —— 提示与钻机的耦合关系
-                _drill_info_h = DRILL_INFO.get(drill)
-                if _drill_info_h:
-                    _, _d_rec_h, _d_range_h = _drill_info_h
-                    _range_str = "/".join(str(x) for x in _d_range_h) + "mm"
-                    _hint = "✅ 与钻机匹配" if hole_diameter in _d_range_h else "⚠️ 与当前钻机标配孔径不符"
-                    st.caption(
-                        f"💡 当前钻机 **{drill}** 标配 **{_d_rec_h}mm**（可用区间 {_range_str}）｜{_hint}\n\n"
-                        f"📐 工程原理：钻机和孔径**强耦合**——大钻机配小孔径=大马拉小车，"
-                        f"台班费高但钻速发挥不出来；切钻机时孔径已自动同步到标配值。"
-                    )
                 pre_split = st.radio("是否预裂", OPTIONS['pre_split'], horizontal=True,
                                      index=OPTIONS['pre_split'].index(DEFAULT_PARAMS['pre_split']))
     else:
@@ -304,7 +275,7 @@ with col_result:
                 st.caption(
                     f"📌 工艺错配阶梯定价：推荐工艺基准价 **{baseline:.2f}** 元/方 × "
                     f"档位差 **{gap}** 档系数 **{factor:.2f}** = **{adj:.2f}** 元/方"
-                    f"　（V8 按错配工艺算 {v8:.2f}，含 V8 自带产量罚，仅作对比）"
+                    f"　（按错配工艺直接算 {v8:.2f}，含产量罚，仅作对比）"
                 )
 
         # —— 岩石参数联动展示 ——
@@ -336,129 +307,219 @@ with col_result:
                 "切换钻机后请保留自动跳转的标配孔径，单换钻机不换孔径反而会变贵。"
             )
 
-        # —— 校验警告 ——
-        # 按设备/维度分组显示，让用户看清楚每条警告的对比基准
-        warn_truck = result.get('warn_truck') if (result.get('warn_truck') and '⚠' in str(result.get('warn_truck',''))) else None
-        warn_drill = result.get('warn_drill') if (result.get('warn_drill') and '⚠' in str(result.get('warn_drill',''))) else None
-        warn_slope = result.get('warn_slope') if (result.get('warn_slope') and '⚠' in str(result.get('warn_slope',''))) else None
-        warn_step  = result.get('warn_step')  if (result.get('warn_step')  and '⚠' in str(result.get('warn_step',''))) else None
-        warn_process_v8 = result.get('warn_process') if (result.get('warn_process') and '⚠' in str(result.get('warn_process',''))) else None
+        # —— 工艺设备匹配度校验 ——
+        # 将推荐组合与用户选择逐项对比，不符的统一说明原因
+        with st.expander("📋 工艺设备匹配度校验", expanded=True):
+            rec_process = result.get('recommend_process', '—')
+            rec_exc     = result.get('recommend_exc', '—')
+            rec_truck   = result.get('recommend_truck', '—')
+            rec_drill   = result.get('recommend_drill', '—')
+            rec_hole_d  = result.get('recommend_hole_d', '—')
+            user_params = st.session_state.get('last_params', {})
+            user_process = user_params.get('process', '—')
+            user_exc     = user_params.get('excavator', '—')
+            user_truck   = user_params.get('truck', '—')
+            user_drill   = user_params.get('drill', '—')
+            user_hole_d  = user_params.get('hole_diameter', '—')
 
-        # 1) 工艺错配警告（最显眼）
-        if warning:
-            sev = warning.get('severity')
-            ptype = warning.get('process_user', '—')
-            rec = warning.get('process_recommend', '—')
-            msg = warning.get('message', '')
-            gap = warning.get('gap_levels', 0)
-            factor = warning.get('adjusted_factor')
-            baseline = warning.get('baseline_price_incl')
-            adj = warning.get('adjusted_price_incl')
-            v8 = warning.get('v8_original_price_incl')
+            mismatches = []
 
-            # 拼定价说明（gap > 0 才有）
-            price_detail = ""
-            if gap and factor:
-                price_detail = (
-                    f"\n- 阶梯定价：推荐工艺基准 **{baseline:.2f}** × 档位差 **{gap}** 档系数 **{factor:.2f}** = **{adj:.2f}** 元/方"
-                    f"\n- V8 按错配工艺算（含自带产量罚）：{v8:.2f} 元/方"
-                )
-
-            if sev == 'error':
-                st.error(
-                    f"🚨 **工艺错配严重警告**：当前岩石推荐 **{rec}**，您选择了 **{ptype}**（偏软 {gap} 档）。\n\n"
-                    f"- {msg}"
-                    f"{price_detail}"
-                    f"\n- ⚠️ **强烈建议改用「{rec}」**，否则成本将大幅上升。"
-                )
-            elif sev == 'warning':
-                st.warning(
-                    f"⚠️ **工艺错配警告**：当前岩石推荐 **{rec}**，您选择了 **{ptype}**（偏软 {gap} 档）。\n\n"
-                    f"- {msg}"
-                    f"{price_detail}"
-                    f"\n- 建议考虑改用「{rec}」。"
-                )
-            elif sev == 'info':
-                if gap and gap > 0:
-                    # 轻微偏软（如较软岩用直接开挖）
-                    st.info(
-                        f"💡 **工艺偏软提示**：当前岩石推荐 **{rec}**，您选择了 **{ptype}**（偏软 {gap} 档）。"
-                        f"{('（' + msg + '）') if msg else ''}"
-                        f"{price_detail}"
-                    )
+            # 1) 工艺
+            if user_process != rec_process:
+                gap = 0
+                if warning:
+                    gap = warning.get('gap_levels') or warning.get('excess_levels', 0)
+                # 物理不可行性提示：偏软 ≥3 档 = 弱工艺对付强岩石（如 Ⅷ 岩选直接开挖）
+                _phys_hint = ""
+                if warning and warning.get('severity') in ('error', 'warning') and gap and gap >= 3:
+                    _phys_hint = "；此组合在物理上几乎不可行（岩石过硬，弱工艺无法奏效），需按推荐工艺的代价补偿"
+                if warning and warning.get('severity') in ('error', 'warning'):
+                    reason = f"当前岩石推荐「{rec_process}」，您选了「{user_process}」（偏软 {gap} 档），成本将大幅上升{_phys_hint}"
+                elif warning and warning.get('severity') == 'info' and warning.get('excess_levels'):
+                    reason = f"当前岩石推荐「{rec_process}」，您选了「{user_process}」（过剩 {gap} 档，杀鸡用牛刀）"
+                elif warning and warning.get('severity') == 'info':
+                    reason = f"当前岩石推荐「{rec_process}」，您选了「{user_process}」（偏软 {gap} 档）"
                 else:
-                    # C 类：工艺过剩/杀鸡牛刀（方案H 文案修复）
-                    excess = warning.get('excess_levels', 0)
-                    v8_actual = warning.get('v8_actual_price_incl')
-                    rec_base = warning.get('recommend_baseline_incl')
-                    overuse_detail = ""
-                    if v8_actual is not None and rec_base is not None:
-                        diff = v8_actual - rec_base
-                        sign = '+' if diff >= 0 else ''
-                        overuse_detail = (
-                            f"\n- V8 按您选的「**{ptype}**」算实际成本：**{v8_actual:.2f}** 元/方（含税）"
-                            f"\n- 推荐工艺「**{rec}**」默认参数下成本约 **{rec_base:.2f}** 元/方"
-                            f"\n- 差异约 **{sign}{diff:.2f}** 元/方，源自 V8 按不同工艺算的物料参数（松散系数、大块率、运输方量等）"
-                            f"\n- 校正层未额外加罚，**显示的就是 V8 按您选工艺算的真实成本**"
+                    reason = f"推荐「{rec_process}」vs 您选「{user_process}」，工艺不匹配"
+                mismatches.append(("🔧 工艺", user_process, rec_process, reason))
+
+            # 2) 挖机
+            if user_exc != rec_exc:
+                mismatches.append(("⛏️ 挖机", user_exc, rec_exc,
+                    f"推荐挖机「{rec_exc}」按工艺+岩石强度匹配；您选「{user_exc}」，可能影响挖装效率"))
+
+            # 3) 矿卡（含动力类型判断）
+            _user_t = TRUCK_INFO.get(user_truck)
+            _rec_t_code = rec_truck
+            for _code in TRUCK_INFO:
+                if _code in str(rec_truck):
+                    _rec_t_code = _code
+                    break
+            _rec_t = TRUCK_INFO.get(_rec_t_code) if _rec_t_code in TRUCK_INFO else None
+
+            if user_truck != _rec_t_code:
+                _reason_parts = []
+                if _user_t and _rec_t:
+                    _u_load, _u_power = _user_t
+                    _r_load, _r_power = _rec_t
+                    if _u_load != _r_load:
+                        _reason_parts.append(f"载重：您选 {user_truck}({_u_load}t) vs 推荐 {_rec_t_code}({_r_load}t)")
+                    if _u_power != _r_power:
+                        _reason_parts.append(
+                            f"动力：您选 {_u_power} vs 推荐 {_r_power}"
+                            + ("（纯电单方比柴油便宜约 4-5 元/方，但需充电桩配套）" if _r_power == '纯电' else "")
                         )
-                    st.info(
-                        f"💡 **工艺过剩提示**：当前岩石推荐 **{rec}**，您选择了 **{ptype}**"
-                        f"（过剩 {excess} 档，杀鸡用牛刀）。"
-                        f"{('（' + msg + '）') if msg else ''}"
-                        f"{overuse_detail}"
+                if not _reason_parts:
+                    _reason_parts.append(f"推荐「{rec_truck}」vs 您选「{user_truck}」")
+                _dist_total = (user_params.get('dist_in', 0) or 0) + (user_params.get('dist_out', 0) or 0)
+                if _dist_total < 3 and _user_t and _user_t[0] >= 60:
+                    _reason_parts.append("综合运距 <3km + 载重 ≥60t → 大马拉小车不经济")
+                elif _dist_total > 10 and _user_t and _user_t[0] < 60:
+                    _reason_parts.append("综合运距 >10km + 载重 <60t → 频繁往返效率低")
+                mismatches.append(("🚛 矿卡", user_truck, rec_truck, "；".join(_reason_parts)))
+
+            # 4) 钻机
+            _user_d = DRILL_INFO.get(user_drill)
+            if rec_drill not in ('—', '', None) and user_drill != rec_drill:
+                _reason = f"推荐钻机「{rec_drill}」按岩石硬度匹配"
+                if _user_d:
+                    _rec_d = DRILL_INFO.get(rec_drill)
+                    if _rec_d:
+                        _reason += f"（{_rec_d[0]}·标配{_rec_d[1]}mm）"
+                    _reason += f"；您选「{user_drill}」({_user_d[0]}·标配{_user_d[1]}mm)"
+                mismatches.append(("🛠️ 钻机", user_drill, rec_drill, _reason))
+
+            # 5) 孔径（双重判断：vs 推荐孔径 + vs 钻机标配孔径）
+            if user_hole_d not in ('—', '', None) and rec_hole_d not in ('—', '', None):
+                _hole_mismatch = False
+                _hole_reasons = []
+                try:
+                    _uh = int(user_hole_d)
+                    _rh = int(rec_hole_d)
+                    if _uh != _rh:
+                        _hole_mismatch = True
+                        _diff = _uh - _rh
+                        if _diff < 0:
+                            _hole_reasons.append(
+                                f"孔径偏小：您选 {_uh}mm < 推荐 {_rh}mm，"
+                                f"单孔方量减少→每方炸药消耗增加→爆破费升高"
+                            )
+                        else:
+                            _hole_reasons.append(
+                                f"孔径偏大：您选 {_uh}mm > 推荐 {_rh}mm，"
+                                f"需确认钻机能支撑此孔径，否则大孔径+小钻机=小马拉大车"
+                            )
+                except (ValueError, TypeError):
+                    pass
+                if _user_d:
+                    _d_rec = _user_d[1]
+                    _d_range = _user_d[2]
+                    try:
+                        _uh2 = int(user_hole_d)
+                        if _uh2 != _d_rec:
+                            _hole_mismatch = True
+                            if _uh2 < _d_rec:
+                                _hole_reasons.append(
+                                    f"大马拉小车：钻机「{user_drill}」标配 {_d_rec}mm，"
+                                    f"您选 {_uh2}mm → 台班费高但钻速发挥不出来，反而贵"
+                                )
+                            elif _uh2 > _d_rec:
+                                if _uh2 not in _d_range:
+                                    _hole_reasons.append(
+                                        f"小马拉大车：钻机「{user_drill}」可用孔径 {_d_range}mm，"
+                                        f"您选 {_uh2}mm 超出范围，可能无法施工"
+                                    )
+                                else:
+                                    _hole_reasons.append(
+                                        f"钻机「{user_drill}」标配 {_d_rec}mm，"
+                                        f"您选 {_uh2}mm（在可用范围内但非标配，台班效率可能下降）"
+                                    )
+                    except (ValueError, TypeError):
+                        pass
+                if _hole_mismatch:
+                    mismatches.append(("📏 孔径", f"{user_hole_d}mm", f"{rec_hole_d}mm（推荐）", "；".join(_hole_reasons)))
+
+            # 6) 坡度
+            if result.get('warn_slope') and '⚠' in str(result.get('warn_slope', '')):
+                mismatches.append(("⛰️ 坡度", "当前设置", "合理范围", str(result['warn_slope'])))
+
+            # 7) 台阶/边坡
+            if result.get('warn_step') and '⚠' in str(result.get('warn_step', '')):
+                mismatches.append(("📏 台阶", "当前设置", "合理范围", str(result['warn_step'])))
+
+            # —— 预构造：工艺错配补偿明细（绑定到"🔧 工艺"那条 mismatch 下方显示）——
+            _process_extra_lines = []
+            if warning:
+                _gap = warning.get('gap_levels') or warning.get('excess_levels', 0)
+                _factor = warning.get('adjusted_factor')
+                _baseline = warning.get('baseline_price_incl')
+                _adj = warning.get('adjusted_price_incl')
+                _v8_raw = warning.get('v8_original_price_incl')
+                _ptype = warning.get('process_user', '—')
+                _prec = warning.get('process_recommend', '—')
+
+                # B 类（偏软）阶梯定价说明
+                if _gap and _factor and _baseline:
+                    _process_extra_lines.append(
+                        f"💰 阶梯定价：推荐工艺基准 **{_baseline:.2f}** × 档位差 **{_gap}** 档系数 **{_factor:.2f}** = **{_adj:.2f}** 元/方"
+                        + (f" ｜ 按您选工艺直接算（含产量罚）：{_v8_raw:.2f} 元/方" if _v8_raw else "")
                     )
 
-            # 方案H 新增：B 类错配补偿落点说明（让用户看清楚罚加在了哪个成本项）
-            penalty_label = warning.get('penalty_field_label')
-            penalty_extra = warning.get('penalty_extra')
-            note = warning.get('note')
-            if penalty_label and penalty_extra is not None and penalty_extra > 0:
-                st.caption(
-                    f"📍 错配补偿落点：差价 **{penalty_extra:.2f}** 元/方（不含税）"
-                    f"已加到「**{penalty_label}**」上，其他成本项保持 V8 原算真实值不变。"
-                )
+                # B 类错配补偿落点（核心：因工艺错配补偿）
+                _p_label = warning.get('penalty_field_label')
+                _p_extra = warning.get('penalty_extra')
+                _p_orig = warning.get('penalty_field_original')
+                _p_adj  = warning.get('penalty_field_adjusted')
+                if _p_label and _p_extra is not None and _p_extra > 0:
+                    if _p_orig is not None and _p_adj is not None:
+                        _process_extra_lines.append(
+                            f"📍 **因工艺错配补偿**：**{_p_extra:.2f}** 元/方 已加到「**{_p_label}**」上"
+                            f"（原算 {_p_orig:.2f} → 校正后 {_p_adj:.2f}），"
+                            f"为反映物理不可行的真实代价（其他成本项保持原算真实值不变）"
+                        )
+                    else:
+                        _process_extra_lines.append(
+                            f"📍 **因工艺错配补偿**：**{_p_extra:.2f}** 元/方（不含税）已加到「**{_p_label}**」上，"
+                            f"为反映物理不可行的真实代价（其他成本项保持原算真实值不变）"
+                        )
 
-            # 方案H 新增：V8 模型跳过项解释（如极软岩+爆破工艺时爆破费=0）
-            skip_reason = warning.get('v8_skip_reason')
-            if skip_reason:
-                st.caption(f"ℹ️ {skip_reason}")
+                # 模型规则跳过项说明（如 f<2 时爆破费=0）
+                _skip_reason = warning.get('v8_skip_reason')
+                if _skip_reason:
+                    _clean_skip = _skip_reason.replace('V8', '模型')
+                    _process_extra_lines.append(f"ℹ️ {_clean_skip}")
 
-        # 2) 设备级警告：按维度分组显示（清晰告知"在跟什么比"）
-        if warn_truck:
-            user_truck = st.session_state.get('last_params', {}).get('truck', '—')
-            rec_truck = result.get('recommend_truck', '—')
-            st.warning(f"🚛 **矿卡匹配警告**：{warn_truck}")
+                # C 类工艺过剩差异明细
+                if warning.get('severity') == 'info' and warning.get('excess_levels'):
+                    _v8_actual = warning.get('v8_actual_price_incl')
+                    _rec_base = warning.get('recommend_baseline_incl')
+                    if _v8_actual is not None and _rec_base is not None:
+                        _diff = _v8_actual - _rec_base
+                        _sign = '+' if _diff >= 0 else ''
+                        _process_extra_lines.append(
+                            f"💡 按您选「**{_ptype}**」算实际成本 **{_v8_actual:.2f}** vs "
+                            f"推荐「**{_prec}**」默认参数约 **{_rec_base:.2f}**，"
+                            f"差异 **{_sign}{_diff:.2f}** 元/方（未额外加罚，显示的是真实成本）"
+                        )
+
+            # 输出
+            if mismatches:
+                for icon_item, user_val, rec_val, reason in mismatches:
+                    st.warning(f"{icon_item}：您选 **{user_val}** ↔ 推荐 **{rec_val}**")
+                    st.caption(f"   → {reason}")
+                    # 工艺错配补偿明细紧贴工艺那条显示
+                    if icon_item.startswith("🔧 工艺") and _process_extra_lines:
+                        for _line in _process_extra_lines:
+                            st.caption(f"   　 {_line}")
+            else:
+                st.success("✅ 所有工艺设备参数均与推荐方案一致，当前组合匹配度良好！")
+
             st.caption(
-                f"📐 对比维度：**矿卡载重 ↔ 综合运距**（不是直接对比"
-                f"「您选的 {user_truck}」与「推荐 {rec_truck}」）。"
-                f"判定规则：综合运距 <3km 选 ≥60t 矿卡 → 大马拉小车不经济；"
-                f"综合运距 >10km 选 <60t 矿卡 → 频繁往返效率低。"
-                f"如需匹配推荐矿卡，请参考上方「系统推荐方案」中的推荐矿卡。"
+                "📐 **判定依据**：工艺=岩石普氏系数；挖机=工艺+岩石强度；"
+                "矿卡=运距+载重+坡度+动力类型（T=柴油/E=纯电，纯电单方便宜约 4-5 元但需充电桩）；"
+                "钻机=岩石硬度；孔径=岩石+工艺（大钻机配小孔径=大马拉小车，台班费高钻速出不来）；"
+                "坡度/台阶=安全与效率校验。"
             )
-            st.caption(
-                f"🔋 **动力差额外提示**：T 系列=柴油，E 系列=纯电；"
-                f"切到同载重档的 E 系列矿卡可再节省约 **4–5 元/方**电费差（前提是有充电桩与电网容量）。"
-            )
-        if warn_drill:
-            user_drill = st.session_state.get('last_params', {}).get('drill', '—')
-            rec_drill = result.get('recommend_drill', '—')
-            rec_hole  = result.get('recommend_hole_d', '—')
-            st.warning(f"🛠️ **钻机匹配警告**：{warn_drill}")
-            st.caption(
-                f"📐 对比维度：**钻机能力 ↔ 岩石硬度/钻孔需求**。"
-                f"您选的钻机：{user_drill}，推荐钻机：{rec_drill}（标配孔径 {rec_hole} mm）。"
-            )
-            st.caption(
-                f"📏 **联动提示**：切到推荐钻机后系统会自动把孔径跳到标配值；"
-                f"若手动改回小孔径=大马拉小车，反而单方爆破费会升高。"
-            )
-        if warn_slope:
-            st.warning(f"⛰️ **坡度警告**：{warn_slope}")
-        if warn_step:
-            st.warning(f"📏 **台阶/边坡警告**：{warn_step}")
-        if warn_process_v8 and not warning:
-            # V8 自带的工艺警告（若 model_core 的工艺错配校验未触发，再 fallback 显示）
-            st.warning(f"🔧 **V8 工艺校验**：{warn_process_v8}")
 
         # —— 下载 ——
         st.divider()
@@ -475,4 +536,4 @@ with col_result:
 
 # ============ 底部 ============
 st.divider()
-st.caption("© 大型土石方成本测算 · V8 模型 · 含税综合单价 = 直接成本 × (1+税率)")
+st.caption("© 大型土石方成本测算 · 含税综合单价 = 直接成本 × (1+税率)")
