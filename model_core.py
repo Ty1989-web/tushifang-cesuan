@@ -139,6 +139,80 @@ OPTIONS = {
 # ---------- 默认参数（用户视角的"默认工况"） ----------
 DEFAULT_PARAMS = {k: v[2] for k, v in PARAM_MAP.items()}
 
+# ---------- v10 修复版 CHANGELOG（每次升级追加，便于 Excel 端永久追溯） ----------
+CHANGELOG_V10 = [
+    {
+        'no': 1,
+        'date': '2026-06-03',
+        'title': '硬岩+松土阶梯定价被绕过',
+        'severity': '🔴 严重',
+        'files': 'model_core.py (apply_penalty + _inject_correction_layer)',
+        'before': 'Ⅴ/Ⅵ/Ⅶ岩+松土时 V8 原算 763 / 1438 / 8912 元/方，远超物理边界',
+        'after':  '强制走阶梯定价 baseline×2^gap，Ⅴ=134.92 / Ⅵ=154.36 / Ⅶ=181.08 元/方',
+        'detail': '删除 if extra>=0/else 分支，无论 V8 原算多少都按阶梯定价；V8 原算保留为"工艺不可行性证据"显示在校正区',
+    },
+    {
+        'no': 2,
+        'date': '2026-06-03',
+        'title': '坡度参数失灵（OAT 扫描 0 响应）',
+        'severity': '🟡 中等',
+        'files': 'template_v8.xlsx 运输 B59/B61 + 参数库 Z25/Z26',
+        'before': 'slope 0~25% 全程 B65=11.51（坡度完全不进公式）',
+        'after':  '上坡油耗 +B26×Z25(6%/%)，下坡 MAX(0.7, 1-B26×Z26(3%/%))，平路按方向取均值×0.5',
+        'detail': 'B59/B61 末尾乘 IF(方向, 上坡修正, 下坡修正, 平路修正) 三分支',
+    },
+    {
+        'no': 3,
+        'date': '2026-06-03',
+        'title': '爆破几何 3 参数失灵',
+        'severity': '🟡 中等',
+        'files': 'template_v8.xlsx 钻爆 B17/B52 + 参数库 Z27~Z31',
+        'before': '缓冲孔/坡面角/台阶高度三参数 0 响应（仅预裂=是时才用 buffer_rows）',
+        'after':  '主爆破费 B17 末尾 ×(1+B22×Z27)；钻孔单耗 B52 乘坡面角和台阶高度修正',
+        'detail': '缓冲孔基线 15%/排，坡面角基准 75°、单耗系数 0.008/°，台阶基准 10m、系数 0.015',
+    },
+    {
+        'no': 4,
+        'date': '2026-06-03',
+        'title': '自有 vs 租赁倒挂',
+        'severity': '🟠 反直觉',
+        'files': 'template_v8.xlsx 挖装 B34 / 运输 B73 / 钻爆 B98 + 参数库租赁单价',
+        'before': '矿卡租赁比自有便宜 1%，钻机租赁便宜 4%（与市场常识相反）',
+        'after':  '矿卡租赁比自有贵 1.3%，三处全部 MAX(参数库租赁, 自有×1.05) 兜底',
+        'detail': '双保险：①06-02 参数库租赁单价整体上调 ②公式兜底租赁不得低于自有×1.05',
+    },
+    {
+        'no': 5,
+        'date': '2026-06-03',
+        'title': '诊断脚本"工艺过剩"误报',
+        'severity': '⚪ 工具',
+        'files': '通测_20260603/脚本/diagnose_v2.py',
+        'before': 'user_level>rec_level 时也报红（过剩工艺更贵符合物理却被误判 bug）',
+        'after':  '只有 user_level<rec_level 且更便宜才报红；过剩工艺降为🟡观察项',
+        'detail': '工艺过剩时单价正常应该更贵，是用户主动选择代价不是 bug，降级观察',
+    },
+    {
+        'no': 6,
+        'date': '2026-06-02',
+        'title': '参数库锚定真实市场价（康定+宇通试用数据）',
+        'severity': '🟢 数据',
+        'files': 'template_v8.xlsx 参数库 J26:J33/M26:M33/K40:K47/N40:N47/K51:K58/N51:N58',
+        'before': 'W4.5 挖机 320 万 / T65B 矿卡 110 万 / ZG90 钻机 130 万（偏离市场）',
+        'after':  'W4.5=250 万 / T65B=80 万 / 50 吨电池矿卡（徐工 385）=96 万',
+        'detail': '锚点来源：①徐工康定项目正式报价单 ②宇通 5 月试用车采购数据 ③主流矿卡品牌网询价',
+    },
+    {
+        'no': 7,
+        'date': '2026-06-03',
+        'title': '孔径↔钻机视觉强化（方案A）',
+        'severity': '⚪ 体验',
+        'files': 'app.py 孔径 selectbox 后追加 caption + warning + error',
+        'before': '换钻机时孔径在悄悄跳，用户察觉不到；爆破区独立选孔径时与钻机脱节，只能事后到「不匹配诊断」里看',
+        'after':  '孔径下方实时显示「钻机xxx 推荐 N mm·可用 [...]」，非标配弹黄色 warning，超区间弹红色 error',
+        'detail': '不限制孔径下拉选项（保留大马拉小车/小马拉大车对比能力），三档反馈：✅标配 / ⚠️非标配但在区间 / 🚫超区间',
+    },
+]
+
 
 # ============================================================
 # 设备元信息映射（方案 I 新增 · 2026-06-01）
@@ -417,33 +491,36 @@ def apply_penalty(result):
     main_field = COST_FIELD_BY_PROCESS.get(proc, 'cost_excavate')
     main_label = COST_FIELD_LABEL.get(main_field, main_field)
     orig_main = result.get(main_field) or 0
+    # ---- v10 修复（病灶1）：强制走阶梯定价 ----
+    # 旧逻辑：MAX(target_excl, base_excl) → V8原算更高时不下调
+    # 问题：V8在硬岩+松土自带产量罚，原算763/1438/8912，全部走else分支不下调
+    # 新逻辑：无论V8原算多少，错配工艺一律按 baseline × 2^gap 强制定价
+    #         V8原算保留在 warning.v8_original_price_incl，UI 显示作为"工艺不可行性证据"
     extra = target_excl - base_excl
+    result[main_field + '_original'] = orig_main
+    result[main_field] = orig_main + extra  # extra 可能为负（V8原算>阶梯定价时）
+    result['penalty_field'] = main_field
+    result['penalty_field_label'] = main_label
+    result['penalty_extra'] = round(extra, 4)
+    result['penalty_multiplier'] = factor
+    result['price_excl_tax'] = target_excl
+    result['price_incl_tax'] = target_incl
+    mismatch['penalty_field'] = main_field
+    mismatch['penalty_field_label'] = main_label
+    mismatch['penalty_extra'] = round(extra, 2)
+    mismatch['penalty_field_original'] = round(orig_main, 2)
+    mismatch['penalty_field_adjusted'] = round(orig_main + extra, 2)
     if extra >= 0:
-        # 阶梯定价更贵 → 差价加到错配主项，按阶梯定价收
-        result[main_field + '_original'] = orig_main
-        result[main_field] = orig_main + extra
-        result['penalty_field'] = main_field
-        result['penalty_field_label'] = main_label
-        result['penalty_extra'] = round(extra, 4)
-        result['penalty_multiplier'] = factor
-        result['price_excl_tax'] = target_excl
-        result['price_incl_tax'] = target_incl
-        mismatch['penalty_field'] = main_field
-        mismatch['penalty_field_label'] = main_label
-        mismatch['penalty_extra'] = round(extra, 2)
-        # 独立字段：让 UI 能精确取到"原算/校正后"两个具体数值
-        mismatch['penalty_field_original'] = round(orig_main, 2)
-        mismatch['penalty_field_adjusted'] = round(orig_main + extra, 2)
         mismatch['note'] = (
             f"错配补偿 {extra:.2f} 元/方 已加到「{main_label}」上"
             f"（原算 {orig_main:.2f} → 校正后 {orig_main+extra:.2f}）"
-            f"，其他成本项保持原算真实值不变"
         )
     else:
-        # 原算已超过阶梯定价 → 按实际成本走（不强制下调）
+        # V8原算 > 阶梯定价：强制下调到阶梯定价，原算作为"工艺不可行性证据"
         mismatch['note'] = (
-            f"按错配工艺直接算出 {base_incl:.2f} 元/方，已超过阶梯定价 {target_incl:.2f}，"
-            "按实际成本计费（错配工艺实际成本更高，无需额外补偿）"
+            f"V8 原算 {base_incl:.2f} 元/方（错配工艺产量极低导致台班费÷低产量飙高），"
+            f"已强制按阶梯定价 {target_incl:.2f} 元/方收（baseline {baseline_incl:.2f} × 2^{gap}）。"
+            f"V8 原算反向证明该工艺不可行，建议改用「{mismatch['process_recommend']}」"
         )
     return result
 
@@ -1089,7 +1166,10 @@ def _inject_correction_layer(wb) -> None:
     f_gap     = f"MAX(0,({f_rec_lv})-({f_user_lv}))"
     f_factor  = f"IF({f_gap}>0,POWER(2,{f_gap}),1)"
     f_base    = f"IFERROR(VLOOKUP(B4,{cfg_q}!$A$2:$B$9,2,0),0)"
-    f_correct = f"MAX({f_base}*{f_factor},{f_v8_incl})"
+    # v10 修复（病灶1）：强制走阶梯定价 baseline × 2^gap
+    # 旧公式：f_correct = MAX(基准×系数, V8原算) → 硬岩+松土时V8原算更高被走else
+    # 新公式：f_correct = 基准×系数（直接强制），V8原算保留在 D70 显示作为对照
+    f_correct = f"{f_base}*{f_factor}"
 
     # B64：综合单价(不含税) → 校正后/(1+税率)（错配时）或 V8 原算之和（无错配时）
     ws['B64'] = f"=IF({f_gap}>0,{f_correct}/(1+'基础核心-参数库'!$B$20),{f_v8_excl})"
@@ -1131,6 +1211,183 @@ def _inject_correction_layer(wb) -> None:
     except Exception:
         ws.column_dimensions['D'].width = 26
         ws.column_dimensions['E'].width = 16
+
+
+def _write_changelog_sheet(wb) -> None:
+    """写入「📜 更新日志-CHANGELOG」sheet，把 CHANGELOG_V10 逐条沉淀到 Excel。
+
+    每次模型升级追加新版本 CHANGELOG_VXX 都会自动追加到这里，便于用户追溯升级历史。
+    """
+    sheet_name = '📜 更新日志-CHANGELOG'
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+
+    # 标题行
+    ws['A1'] = '📜 v10 修复版 — 更新日志'
+    ws['A1'].font = Font(bold=True, size=14, color='305496')
+    ws.merge_cells('A1:G1')
+
+    ws['A2'] = '说明：本表逐条记录 v10 相对 v9-方案K 的修复内容，含修改前/后效果对比与文件位置，便于版本追溯。'
+    ws['A2'].alignment = _ALIGN_WRAP
+    ws['A2'].font = Font(italic=True, color='666666', size=10)
+    ws.merge_cells('A2:G2')
+
+    # 表头
+    headers = ['#', '日期', '严重程度', '问题/改动', '修改前', '修改后', '改动文件']
+    for i, h in enumerate(headers, start=1):
+        c = ws.cell(row=4, column=i, value=h)
+        c.font = _FONT_HEAD
+        c.fill = _FILL_HEAD
+        c.alignment = _ALIGN_CTR
+
+    # 逐条写入
+    severity_fill = {
+        '🔴 严重':   PatternFill('solid', fgColor='F8CBAD'),
+        '🟡 中等':   PatternFill('solid', fgColor='FFF2CC'),
+        '🟠 反直觉': PatternFill('solid', fgColor='FCE4D6'),
+        '🟢 数据':   PatternFill('solid', fgColor='E2EFDA'),
+        '⚪ 工具':   PatternFill('solid', fgColor='F2F2F2'),
+        '⚪ 体验':   PatternFill('solid', fgColor='D9E1F2'),
+    }
+    for i, item in enumerate(CHANGELOG_V10, start=5):
+        row_fill = severity_fill.get(item['severity'], _FILL_NOTE)
+        ws.cell(row=i, column=1, value=item['no'])
+        ws.cell(row=i, column=2, value=item['date'])
+        ws.cell(row=i, column=3, value=item['severity'])
+        ws.cell(row=i, column=4, value=f"{item['title']}\n— {item['detail']}")
+        ws.cell(row=i, column=5, value=item['before'])
+        ws.cell(row=i, column=6, value=item['after'])
+        ws.cell(row=i, column=7, value=item['files'])
+        for col in range(1, 8):
+            cell = ws.cell(row=i, column=col)
+            cell.alignment = _ALIGN_WRAP
+            cell.fill = row_fill
+
+    # 列宽
+    widths = {'A': 5, 'B': 12, 'C': 11, 'D': 50, 'E': 36, 'F': 36, 'G': 38}
+    for col, w in widths.items():
+        ws.column_dimensions[col].width = w
+
+    # 行高（让长文本能完全显示）
+    ws.row_dimensions[1].height = 26
+    ws.row_dimensions[2].height = 30
+    ws.row_dimensions[4].height = 22
+    for i in range(5, 5 + len(CHANGELOG_V10)):
+        ws.row_dimensions[i].height = 72
+
+    # 底部签名
+    foot_row = 5 + len(CHANGELOG_V10) + 1
+    ws.cell(row=foot_row, column=1, value='— 生成自 model_core.py / 修复版本 v10 / 2026-06-03 —')
+    ws.cell(row=foot_row, column=1).font = Font(italic=True, color='999999', size=9)
+    ws.merge_cells(start_row=foot_row, end_row=foot_row, start_column=1, end_column=7)
+
+
+def _hide_orphan_params(wb) -> None:
+    """扫描「基础核心-参数库」sheet，将「未被任何公式引用」的参数 cell 灰显标记。
+
+    工程意义：参数库里大量历史预留/废弃/备用参数会让用户误以为"改了就有效"，
+    但这些 cell 实际上从来不进任何公式。本函数把它们灰显并加 sheet 级注释，
+    既不删数据（保留扩展空间），又给用户清晰的视觉提示。
+
+    扫描算法：
+        ① 遍历所有 sheet 公式，提取所有 cell 引用（含跨表区域 + 本表区域）
+        ② 取出对参数库的引用集合
+        ③ 参数库内所有非空数值 cell，若不在引用集合 → 标灰
+    """
+    import re
+    from openpyxl.utils import column_index_from_string, get_column_letter
+
+    param_sheet_name = '基础核心-参数库'
+    if param_sheet_name not in wb.sheetnames:
+        return
+
+    def expand_refs(formula, src_sheet):
+        refs = set()
+        # ① 跨表区域 'xx'!$A$1:$B$10
+        rng_cross = re.compile(
+            r"'?([^'!]*?)'?\s*!\s*\$?([A-Z]+)\$?(\d+)\s*:\s*\$?([A-Z]+)\$?(\d+)",
+            re.IGNORECASE,
+        )
+        for m in rng_cross.finditer(formula):
+            sname, c1, r1, c2, r2 = m.groups()
+            c1i, c2i = column_index_from_string(c1), column_index_from_string(c2)
+            for col in range(min(c1i, c2i), max(c1i, c2i) + 1):
+                for row in range(min(int(r1), int(r2)), max(int(r1), int(r2)) + 1):
+                    refs.add((sname, f"{get_column_letter(col)}{row}"))
+        f1 = rng_cross.sub('', formula)
+        # ② 跨表单 cell 'xx'!$A$1
+        cross_single = re.compile(
+            r"'?([^'!,\s\(\)\+\-\*/=<>%&]+?)'?\s*!\s*\$?([A-Z]+)\$?(\d+)",
+            re.IGNORECASE,
+        )
+        for m in cross_single.finditer(f1):
+            sname, col, row = m.groups()
+            refs.add((sname, f"{col.upper()}{row}"))
+        f2 = cross_single.sub('', f1)
+        # ③ 本表区域 A1:B10
+        rng_local = re.compile(r"\$?([A-Z]+)\$?(\d+)\s*:\s*\$?([A-Z]+)\$?(\d+)")
+        for m in rng_local.finditer(f2):
+            c1, r1, c2, r2 = m.groups()
+            c1i, c2i = column_index_from_string(c1), column_index_from_string(c2)
+            for col in range(min(c1i, c2i), max(c1i, c2i) + 1):
+                for row in range(min(int(r1), int(r2)), max(int(r1), int(r2)) + 1):
+                    refs.add((src_sheet, f"{get_column_letter(col)}{row}"))
+        f3 = rng_local.sub('', f2)
+        # ④ 本表单 cell
+        single = re.compile(r"(?<![A-Z!])\$?([A-Z]+)\$?(\d+)")
+        for m in single.finditer(f3):
+            col, row = m.groups()
+            refs.add((src_sheet, f"{col.upper()}{row}"))
+        return refs
+
+    # 全表扫描所有 cell 引用
+    all_refs: set = set()
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            for cell in row:
+                v = cell.value
+                if isinstance(v, str) and v.startswith('='):
+                    all_refs.update(expand_refs(v[1:], ws.title))
+
+    # 参数库被引用 cell（含别名）
+    param_aliases = {param_sheet_name, '参数库'}
+    param_referenced = {coord for sname, coord in all_refs if sname in param_aliases}
+
+    # 参数库所有非空数值 cell（不含公式）
+    ws_p = wb[param_sheet_name]
+    orphan_fill = PatternFill('solid', fgColor='D9D9D9')
+    orphan_font = Font(color='999999', italic=True, size=10)
+
+    orphan_count = 0
+    for row in ws_p.iter_rows():
+        for cell in row:
+            v = cell.value
+            if v is None:
+                continue
+            if isinstance(v, str) and v.startswith('='):
+                continue  # 公式不动
+            if not isinstance(v, (int, float)):
+                continue  # 字符串标签不动
+            if cell.coordinate in param_referenced:
+                continue  # 已被引用
+            # 孤儿：灰显
+            cell.fill = orphan_fill
+            cell.font = orphan_font
+            orphan_count += 1
+
+    # 在参数库顶部加汇总说明（如果有孤儿）
+    if orphan_count > 0:
+        # 找第 1 个空行的下面位置（用 AC1 避免冲突）
+        ws_p['AC1'] = f'⚪ 灰显说明'
+        ws_p['AC1'].font = Font(bold=True, color='999999', size=10)
+        ws_p['AC2'] = f'共 {orphan_count} 个参数 cell 当前未被任何公式引用'
+        ws_p['AC2'].font = Font(color='999999', size=9)
+        ws_p['AC3'] = '已用浅灰显示——改这些值不会影响计算结果'
+        ws_p['AC3'].font = Font(color='999999', size=9)
+        ws_p['AC4'] = '保留它们是为后续扩展（如新工艺/新设备）预留空间'
+        ws_p['AC4'].font = Font(color='999999', size=9)
+        ws_p.column_dimensions['AC'].width = 42
 
 
 def export_xlsx(params: Dict[str, Any] = None) -> bytes:
@@ -1179,6 +1436,14 @@ def export_xlsx(params: Dict[str, Any] = None) -> bytes:
         # 审计 sheet 仍是"下载时快照"
         _write_audit_sheet(wb, audit, out)
         _write_correction_sheet(wb, out, audit)
+
+        # v10 新增：CHANGELOG 永久沉淀 + 孤儿参数灰显（必须在所有 sheet 写完后再扫描）
+        _write_changelog_sheet(wb)
+        try:
+            _hide_orphan_params(wb)
+        except Exception as e:
+            # 孤儿扫描出错不影响主流程
+            print(f'[export_xlsx] 孤儿参数扫描跳过: {e}', file=sys.stderr)
 
         # ④ 保存到字节流
         buf = io.BytesIO()

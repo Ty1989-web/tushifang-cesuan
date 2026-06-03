@@ -196,6 +196,40 @@ with col_form:
                     st.session_state['hole_diameter_key'] = DEFAULT_PARAMS['hole_diameter']
                 hole_diameter = st.selectbox("孔径 (mm)", OPTIONS['hole_diameter'],
                                              key='hole_diameter_key')
+                # 方案A 视觉强化（v10.1, 26-06-03）—— 孔径↔钻机联动状态实时显示
+                # 不限制下拉选项（保留"大马拉小车 / 小马拉大车"对比能力），
+                # 而是用 caption + warning + error 三档实时反馈当前选择是否匹配
+                _di = DRILL_INFO.get(drill)
+                if _di:
+                    _dt, _drec, _drange = _di
+                    _rng_s = '/'.join(str(x) for x in _drange)
+                    if hole_diameter == _drec:
+                        st.caption(
+                            f"📏 钻机「{drill}」（{_dt}）推荐 **{_drec}mm**·可用 [{_rng_s}]"
+                            f"　✅ 当前为标配孔径"
+                        )
+                    elif hole_diameter in _drange:
+                        st.caption(
+                            f"📏 钻机「{drill}」（{_dt}）推荐 **{_drec}mm**·可用 [{_rng_s}]"
+                        )
+                        st.warning(
+                            f"⚠️ 孔径 {hole_diameter}mm 在钻机可用范围内，但非标配（推荐 {_drec}mm），"
+                            f"台班效率可能下降"
+                        )
+                    else:
+                        st.caption(
+                            f"📏 钻机「{drill}」（{_dt}）推荐 **{_drec}mm**·可用 [{_rng_s}]"
+                        )
+                        if hole_diameter < _drec:
+                            st.error(
+                                f"🚫 大马拉小车：钻机「{drill}」标配 {_drec}mm，您选 {hole_diameter}mm"
+                                f" → 台班费高但钻速发挥不出来，反而贵"
+                            )
+                        else:
+                            st.error(
+                                f"🚫 小马拉大车：钻机「{drill}」可用孔径 [{_rng_s}]mm，"
+                                f"您选 {hole_diameter}mm 超出范围，可能无法施工"
+                            )
                 pre_split = st.radio("是否预裂", OPTIONS['pre_split'], horizontal=True,
                                      index=OPTIONS['pre_split'].index(DEFAULT_PARAMS['pre_split']))
     else:
